@@ -1,0 +1,241 @@
+# CCBar Windows
+
+**在 Windows 托盘查看 AI 编程工具的剩余额度、使用量和会话费用。**
+
+CCBar 自动读取本机已登录工具的额度，以及编程工具保存的会话日志。打开统计窗口，可以按服务、模型、项目或会话查看 Tokens 与估算费用；在「Claude 账号」页面可以保存多个登录并一键切换。
+
+本项目基于 [nanvon/cc-bar](https://github.com/nanvon/cc-bar)，使用 Go、Wails 3、React、TypeScript 和 Tailwind CSS。原版 macOS 项目由 nanvon 维护。
+
+## 核心能力
+
+- **额度监控**：Codex、Claude Code、Antigravity、Cursor、Command Code 的额度窗口、重置时间和服务状态
+- **本地统计**：Codex、Claude Code、Pi、Oh My Pi（OMP）、OpenCode、DSH 会话日志，以及 Cursor 远端用量
+- **统计分析**：服务、模型和提供商聚合，日周月图表、环比、缓存命中率和 Fast 档位费用
+- **会话浏览**：全局搜索、项目筛选、分页、模型拆分和逐请求明细
+- **额度历史**：真实周期、额外重置与各账号独立的额度变化时间线
+- **账号管理**：Claude 官方登录与共享会话；额外 Codex 账号导入、排序、展示和重置次数管理
+- **桌面集成**：托盘弹窗、可拖动悬浮窗、登录启动、隐私模式、中英双语和明暗主题
+
+## 系统要求
+
+| 用途 | 需要准备 |
+| --- | --- |
+| 运行 CCBar | Windows 10/11 x64、`CCBar.exe`、Microsoft Edge WebView2 Runtime |
+| 查看服务额度 | 对应工具已在本机登录，网络能访问该服务 |
+| 查看日志统计 | 对应编程工具在本机运行并保存会话记录 |
+| 管理 Claude 账号 | 本机已安装 Claude Code CLI；导入 Desktop 登录需要已启用 Desktop 的 Code 功能 |
+| 从源码构建 | Go 1.25+、Node.js 24、PowerShell 7 |
+
+WebView2 是 Windows 上显示界面的运行库。缺少时，从 [Microsoft 官方页面](https://developer.microsoft.com/microsoft-edge/webview2/)安装 Evergreen Runtime。
+
+## 快速开始
+
+1. [下载 CCBar.exe](https://github.com/Mag1cFall/cc-bar/releases/latest/download/CCBar.exe)，放在希望长期使用的目录，双击运行。
+2. 首次引导中启用所需服务，选择托盘与悬浮窗的展示位置。
+3. 在对应编程工具中完成登录或产生会话记录后，CCBar 会读取额度和统计。
+4. 单击右下角托盘图标查看额度；双击打开统计窗口。托盘图标可能位于 Windows 的折叠区域。
+
+左下角的月亮或太阳按钮可快速切换明暗模式。在「设置 → 外观与显示 → 主题」选择「跟随系统」「浅色」或「深色」，主窗口、托盘弹窗与悬浮窗同步切换。
+
+关闭主窗口后，应用继续驻留托盘。完整退出时使用托盘菜单的「退出」。「登录时启动」使用当前 EXE 所在路径；移动 EXE 后重新打开应用并保存该设置。
+
+在「通用 → 更新」点击「检查更新」，可以检查 [Mag1cFall/cc-bar 的 Windows Release](https://github.com/Mag1cFall/cc-bar/releases)。发现新版本后点击「下载并安装」，确认后会替换当前 EXE 并重启。设置与会话记录继续保存在原数据目录。请将 EXE 放在当前用户有写入权限的目录，例如 `%LOCALAPPDATA%\Programs\CCBar`。
+
+### Claude 多账号
+
+打开设置的「Claude 账号」，点击「保存当前登录」保存现有 Claude Code 登录。已登录 Claude Desktop 的用户，可以保存其 Code 功能的登录；先在 Desktop 的 Code 页面打开一次会话，即可准备好对应凭据。
+
+点击「添加账号」，为新账号完成 Claude Code 的官方浏览器授权。点击已保存账号的「切换」设为新终端的默认账号，或点击「启动」直接用该账号打开 Claude Code。启动时使用本机终端实际解析到的 `claude` 命令，支持 PowerShell 函数、别名和脚本入口。
+
+账号的登录信息各自保存，项目会话、历史索引、任务和计划共享。CLI 偏好与 MCP 设置同步使用。已经运行的终端继续使用启动时选择的账号。
+
+Claude CLI 安装步骤见 [官方安装页面](https://code.claude.com/docs/en/setup)。在终端运行 `claude --version` 可确认安装成功。在相同工作目录执行 `claude --resume` 可以继续共享的项目会话。
+
+### 统计来源
+
+| 来源 | 默认会话位置 |
+| --- | --- |
+| Codex | `%USERPROFILE%\.codex\sessions` 与历史归档 |
+| Claude Code | `%USERPROFILE%\.claude\projects` |
+| Pi | `%USERPROFILE%\.pi\agent\sessions` |
+| Oh My Pi（OMP） | `%USERPROFILE%\.omp\agent\sessions`，含配置档与子代理会话 |
+| OpenCode | `%USERPROFILE%\.local\share\opencode` |
+| DSH | `%USERPROFILE%\.dsh\sessions` |
+| Cursor | 当前账号的远端计量记录 |
+
+额度百分比来自服务返回的限额；统计费用按日志 Tokens、模型和价格估算。订阅费、剩余额度和本地估算费用分别展示。
+
+## 数据与常见问题
+
+CCBar 的设置、数据库和运行日志保存在 `%LOCALAPPDATA%\CCBar`。设置中的「打开数据目录」可以直接进入该位置。
+
+| 看到的情况 | 处理方式 |
+| --- | --- |
+| 服务显示未检测到 | 在对应工具中完成登录，随后点击刷新 |
+| 账号提示重新登录 | 在账号页面运行官方登录流程 |
+| 统计列表为空 | 确认会话已产生，启用该数据来源并运行扫描 |
+| 额度刷新受限 | 等待服务的退避时间，再查看更新 |
+| 切换后旧终端仍使用原账号 | 新开终端，或在账号页面点击「启动」 |
+| 需要反馈问题 | 提供系统与应用版本、复现步骤，以及设置页导出的诊断包 |
+
+## 源码构建
+
+在项目根目录执行：
+
+```powershell
+cd web
+npm ci
+npm run lint
+npm run build
+cd ..
+go install github.com/wailsapp/wails/v3/cmd/wails3@v3.0.0-beta.27
+$wails = Join-Path (go env GOPATH) 'bin/wails3.exe'
+New-Item -ItemType Directory -Path dist -Force
+& $wails generate icons -input internal/desktop/assets/icon.png -windowsfilename dist/icon.ico -macfilename ''
+& $wails generate syso -arch amd64 -icon dist/icon.ico -manifest cmd/ccbar/windows.manifest -info cmd/ccbar/version.json -out cmd/ccbar/rsrc_windows_amd64.syso
+$env:CGO_ENABLED = '0'
+go build -trimpath -tags production -ldflags '-s -w -H windowsgui' -o dist/CCBar.exe ./cmd/ccbar
+```
+
+产物为 `dist/CCBar.exe`，前端已内嵌。
+
+`windows.manifest` 和 `version.json` 是生成 EXE 资源的固定输入，分别提供权限与 DPI 清单、文件版本和名称。运行发布版时双击 `CCBar.exe` 即可。
+
+完成首次构建后，前端开发使用 Vite 热更新。在一个终端启动前端：
+
+```powershell
+cd web
+npm ci
+npm run dev
+```
+
+在另一个终端进入项目根目录，启动桌面宿主：
+
+```powershell
+$env:FRONTEND_DEVSERVER_URL = 'http://127.0.0.1:5173'
+go run ./cmd/ccbar
+```
+
+### 代码目录
+
+```text
+cc-bar/
+├── .github/
+│   └── workflows/
+│       └── release.yml           Windows 构建与 Release 发布
+├── cmd/
+│   └── ccbar/
+│       ├── main.go               程序入口、日志与更新助手入口
+│       ├── windows.manifest      Windows 权限与 DPI 清单
+│       └── version.json          EXE 名称、版权和版本资源
+├── internal/
+│   ├── app/                      应用服务与界面 RPC
+│   │   ├── service.go            共享状态、设置保存与额度刷新
+│   │   ├── scheduler.go          定时刷新、日志监听与休眠恢复
+│   │   ├── accounts.go           账号管理接口
+│   │   ├── cycles.go             周期统计与剩余用量预测
+│   │   ├── settings.go           设置读取与持久化
+│   │   ├── locale_windows.go     Windows 系统语言读取
+│   │   ├── diagnostics.go        诊断包导出与身份脱敏
+│   │   ├── update.go             GitHub 更新、EXE 替换与重启
+│   │   ├── cycles_test.go        周期与预测检查
+│   │   ├── settings_test.go      设置读取检查
+│   │   └── update_test.go        版本选择与更新流程检查
+│   ├── desktop/                  原生桌面窗口与托盘
+│   │   ├── desktop.go            主窗口、托盘弹窗与悬浮窗
+│   │   ├── platform_windows.go   登录启动、系统事件与目录打开
+│   │   ├── icon.go               内嵌应用图标
+│   │   └── assets/
+│   │       └── icon.png          应用图标源文件
+│   ├── accounts/                 多账号与共享会话
+│   │   ├── store.go              账号存储、登录状态与额度刷新
+│   │   ├── types.go              Claude 与 Codex 账号类型
+│   │   ├── cli.go                Claude 登录、切换与终端启动
+│   │   ├── desktop.go            Claude Desktop Code 登录导入
+│   │   ├── platform_windows.go   PowerShell 入口、环境变量与目录联接
+│   │   ├── history.go            共享会话、任务、历史与 MCP 设置
+│   │   ├── codex.go              Codex 账号导入、排序与展示
+│   │   ├── credits.go            Codex 重置次数管理
+│   │   └── accounts_test.go      账号隔离与历史共享检查
+│   ├── providers/                凭据发现与服务接口
+│   │   ├── credentials.go        本机登录凭据读取
+│   │   ├── client.go             额度请求与服务状态查询
+│   │   ├── refresh.go            OAuth 凭据刷新
+│   │   ├── antigravity.go        Antigravity 本地连接与额度
+│   │   ├── credits.go            Codex 限额重置接口
+│   │   ├── parsers.go            服务响应解析
+│   │   ├── json.go               JSON 读取与原子写入
+│   │   └── providers_test.go     凭据与响应解析检查
+│   ├── history/                  额度历史与账号周期
+│   │   ├── history.go            额度采样与时间线
+│   │   ├── cycles.go             周期边界、重置与账号使用区间
+│   │   └── history_test.go       历史与周期检查
+│   ├── usage/                    会话日志与用量数据库
+│   │   ├── store.go              SQLite 数据库与索引
+│   │   ├── scan.go               日志发现与增量扫描
+│   │   ├── parse.go              Codex、Claude 与 OpenCode 日志解析
+│   │   ├── harness.go            Pi、OMP 配置档与子代理会话
+│   │   ├── dsh.go                DSH 日志与压缩数据解析
+│   │   ├── cursor.go             Cursor 远端用量读取
+│   │   ├── pricing.go            模型价格与费用计算
+│   │   ├── projects.go           项目识别与会话标题
+│   │   ├── query.go              概览、会话和逐请求统计
+│   │   └── usage_test.go         扫描、定价与统计检查
+│   ├── model/                    公共数据类型
+│   │   ├── enums.go              服务、来源与额度窗口枚举
+│   │   ├── types.go              设置、凭据与额度类型
+│   │   └── usage.go              用量、会话与查询类型
+│   └── secrets/
+│       └── protect_windows.go    Windows DPAPI 凭据保护
+├── web/                          React 前端
+│   ├── src/
+│   │   ├── main.tsx              React 入口
+│   │   ├── App.tsx               页面导航与应用状态订阅
+│   │   ├── Statistics.tsx        服务、日期与统计视图切换
+│   │   ├── statistics/
+│   │   │   ├── Overview.tsx      概览、Token 拆分与图表
+│   │   │   ├── Conversations.tsx 会话搜索、分页与详情
+│   │   │   ├── Timeline.tsx      额度变化时间线
+│   │   │   ├── Cycles.tsx        额度周期与预测
+│   │   │   └── shared.tsx        统计视图公共组件
+│   │   ├── Settings.tsx          服务、外观、数据与通用设置
+│   │   ├── Accounts.tsx          Claude 账号管理
+│   │   ├── ResetCredits.tsx      Codex 限额重置窗口
+│   │   ├── MiniWindows.tsx       托盘弹窗与悬浮窗
+│   │   ├── Onboarding.tsx        首次启动引导
+│   │   ├── ThemeToggle.tsx       明暗切换与圆形展开动画
+│   │   ├── WindowControls.tsx    最小化、最大化与关闭按钮
+│   │   ├── components.tsx       按钮、菜单、对话框与额度组件
+│   │   ├── context.ts           共享应用上下文
+│   │   ├── bridge.ts            Wails RPC 调用
+│   │   ├── hooks.ts             查询缓存与请求取消
+│   │   ├── models.ts            前端数据类型
+│   │   ├── format.ts            数字、日期、服务名称与品牌色
+│   │   └── styles.css           Tailwind 入口、布局与主题
+│   ├── public/
+│   │   ├── ccbar-icon.png       界面应用图标
+│   │   └── logos/               服务 SVG 图标
+│   │       ├── codex.svg
+│   │       ├── claude.svg
+│   │       ├── antigravity.svg
+│   │       ├── cursor.svg
+│   │       ├── commandcode.svg
+│   │       ├── pi.svg
+│   │       ├── omp.svg
+│   │       ├── opencode.svg
+│   │       └── dsh.svg
+│   ├── embed.go                 构建后的前端资源嵌入
+│   ├── index.html               页面入口
+│   ├── package.json             前端依赖与开发命令
+│   ├── package-lock.json        前端依赖锁定
+│   ├── tsconfig.json            TypeScript 配置
+│   ├── vite.config.ts           Vite 与 Tailwind 配置
+│   ├── .prettierignore           格式化文件范围
+│   ├── .prettierrc.json          Prettier 格式规则
+│   └── eslint.config.js         ESLint 规则
+├── .gitignore                   生成文件与本机数据排除
+├── go.mod                       Go 模块与依赖版本
+├── go.sum                       Go 依赖校验信息
+├── LICENSE                      MIT 授权与作者版权
+└── README.md                    使用与开发说明
+```

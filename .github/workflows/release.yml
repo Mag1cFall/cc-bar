@@ -1,0 +1,83 @@
+name: Windows
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: 前端构建
+        working-directory: web
+        run: |
+          npm ci
+          npm run lint
+          npm run build
+      - name: EXE 构建
+        shell: pwsh
+        run: |
+          $version = '0.1.0'
+          if ($env:GITHUB_REF_TYPE -eq 'tag') { $version = $env:GITHUB_REF_NAME.TrimStart('v') }
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $true
+          go install github.com/wailsapp/wails/v3/cmd/wails3@v3.0.0-beta.27
+          $wails = Join-Path (go env GOPATH) 'bin/wails3.exe'
+          New-Item -ItemType Directory -Path dist -Force | Out-Null
+          $info = Get-Content cmd/ccbar/version.json -Raw | ConvertFrom-Json -AsHashtable
+          $info.fixed.file_version = "$version.0"
+          $info.fixed.product_version = "$version.0"
+          $info.info['0409'].ProductVersion = $version
+          $info.info['0409'].FileVersion = "$version.0"
+          $info | ConvertTo-Json -Depth 8 | Set-Content dist/version.json -Encoding utf8NoBOM
+          & $wails generate icons -input internal/desktop/assets/icon.png -windowsfilename dist/icon.ico -macfilename ''
+          & $wails generate syso -arch amd64 -icon dist/icon.ico -manifest cmd/ccbar/windows.manifest -info dist/version.json -out cmd/ccbar/rsrc_windows_amd64.syso
+          $env:CGO_ENABLED = '0'
+          go build -mod=readonly -trimpath -tags production -ldflags "-s -w -H windowsgui -X main.version=$version" -o dist/CCBar.exe ./cmd/ccbar
+      - name: 关键行为检查
+        run: go test ./internal/app ./internal/accounts ./internal/providers ./internal/usage ./internal/history
+      - uses: actions/upload-artifact@v7
+        with:
+          name: CCBar-Windows
+          path: |
+            dist/CCBar.exe
+            LICENSE
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: CCBar-Windows
+          path: release
+      - name: 发布
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view $env:GITHUB_REF_NAME --repo $env:GITHUB_REPOSITORY 2>$null | Out-Null
+          if ($LASTEXITCODE -eq 0) {
+            gh release upload $env:GITHUB_REF_NAME release/dist/CCBar.exe release/LICENSE --repo $env:GITHUB_REPOSITORY --clobber
+          } else {
+            gh release create $env:GITHUB_REF_NAME release/dist/CCBar.exe release/LICENSE --repo $env:GITHUB_REPOSITORY --title $env:GITHUB_REF_NAME --generate-notes
+          }
