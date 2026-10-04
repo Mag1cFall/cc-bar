@@ -5,7 +5,7 @@ import * as SelectPrimitive from '@radix-ui/react-select'
 import * as SwitchPrimitive from '@radix-ui/react-switch'
 import { Check, ChevronDown, ChevronUp, MoreHorizontal, X, LoaderCircle, AlertTriangle } from 'lucide-react'
 import { useApp } from './context'
-import { dateTime, quotaTone, relativeTime, remaining } from './format'
+import { quotaResetTime, quotaTone, remaining } from './format'
 import type { QuotaLimit } from './models'
 
 export function Button({
@@ -263,7 +263,7 @@ export function Quota({
   title: string
   compact?: boolean
 }) {
-  const { english, tr, snapshot } = useApp()
+  const { english, snapshot } = useApp()
   const value = remaining(limit?.window.usedPercent)
   return (
     <div className={`quota ${compact ? 'compact' : ''}`}>
@@ -273,13 +273,7 @@ export function Quota({
       </div>
       <Progress value={value} />
       <div className="quota-caption">
-        {limit?.isActive === false
-          ? tr('Not activated', '尚未激活')
-          : limit?.window.resetsAt
-            ? snapshot.settings.resetTimeDisplay === 'absolute'
-              ? dateTime(limit.window.resetsAt, english, true)
-              : relativeTime(limit.window.resetsAt, english)
-            : '—'}
+        {quotaResetTime(limit, english, snapshot.settings.resetTimeDisplay === 'absolute')}
       </div>
     </div>
   )

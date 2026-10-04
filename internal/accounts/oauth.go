@@ -343,6 +343,13 @@ func (store *Store) desktopSession(profile ClaudeProfile) string {
 	return filepath.Join(store.dataDir, "claude-desktop", profile.ID)
 }
 
+// desktopLoginReady 核对当前身份与同账号完整 Code 凭据
+func desktopLoginReady(directory string, credential *model.Credential) bool {
+	return credential != nil && credential.Source == "Claude Desktop Code" &&
+		hasCompleteCodeLogin(credential) && credential.AccountUUID != "" &&
+		credential.AccountUUID == desktopIdentity(directory)
+}
+
 // loginDesktop 使用 Desktop 的原生登录同时建立网页与 Code 会话
 func (store *Store) loginDesktop(attempt *loginAttempt) error {
 	desktop := attempt.desktop
@@ -382,10 +389,13 @@ func (store *Store) loginDesktop(attempt *loginAttempt) error {
 	ticker := time.NewTicker(500 * time.Millisecond)
 	defer ticker.Stop()
 	openedCode := false
-	var webLoggedInAt time.Time
+	persisting := false
+	var cookieBaseline desktopCookieState
 	for {
-		if desktopIdentity(desktop.Directory) != "" && !openedCode {
-			webLoggedInAt = time.Now()
+		identity := desktopIdentity(desktop.Directory)
+		if identity == "" {
+			cookieBaseline, _ = readDesktopCookieState(desktop.Directory)
+		} else if !openedCode {
 			store.loginStage(attempt, "linking", nil)
 			command := execDesktopCode(desktop.Executable)
 			if err := command.Start(); err != nil {
@@ -395,17 +405,14 @@ func (store *Store) loginDesktop(attempt *loginAttempt) error {
 			openedCode = true
 		}
 		credential, _ := providers.ReadClaudeDesktopDirectory(desktop.Directory, nil)
-		if openedCode && credential != nil && credential.Source == "Claude Desktop Code" && hasCompleteCodeLogin(credential) && credential.AccountUUID == desktopIdentity(desktop.Directory) {
-			store.loginStage(attempt, "persisting", nil)
-			// Chromium 在 30 秒周期内持久化 Cookie
-			flush := time.NewTimer(time.Until(webLoggedInAt.Add(32 * time.Second)))
-			select {
-			case <-attempt.ctx.Done():
-				flush.Stop()
-				return attempt.ctx.Err()
-			case <-flush.C:
+		if openedCode && desktopLoginReady(desktop.Directory, credential) {
+			if !persisting {
+				store.loginStage(attempt, "persisting", nil)
+				persisting = true
 			}
-			return store.finishClaudeLogin(attempt, credential)
+			if cookieBaseline.persisted(desktop.Directory) {
+				return store.finishClaudeLogin(attempt, credential)
+			}
 		}
 		select {
 		case <-attempt.ctx.Done():

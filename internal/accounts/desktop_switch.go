@@ -24,13 +24,6 @@ func (store *Store) checkpointDesktop(desktop *desktopApp) (*ClaudeProfile, erro
 	if !hasCompleteCodeLogin(credential) || credential.AccountUUID != identity || !desktopWebSession(desktop.Directory) {
 		return nil, errors.New("请完成 Desktop 的网页与 Code 登录后再保存账号")
 	}
-	if credential.Email == "" {
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-		if err := providers.FetchClaudeProfile(ctx, credential); err != nil {
-			return nil, err
-		}
-	}
 	store.mu.Lock()
 	profile := ClaudeProfile{ID: strings.ReplaceAll(uuid.NewString(), "-", ""), AccountUUID: identity, Name: "Claude " + identity[:min(8, len(identity))], NeedsLogin: true}
 	index := -1
@@ -41,6 +34,19 @@ func (store *Store) checkpointDesktop(desktop *desktopApp) (*ClaudeProfile, erro
 		}
 	}
 	store.mu.Unlock()
+	if credential.Email == "" {
+		credential.Email = profile.Email
+	}
+	if credential.SubscriptionType == "" {
+		credential.SubscriptionType = profile.Plan
+	}
+	if credential.Email == "" {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if err := providers.FetchClaudeProfile(ctx, credential); err != nil {
+			return nil, err
+		}
+	}
 	profile.DesktopDirectory, profile.DesktopSaved, profile.DesktopLinked = desktop.Directory, true, true
 	if err := saveDesktopSession(desktop.Directory, store.desktopSession(profile)); err != nil {
 		return nil, err

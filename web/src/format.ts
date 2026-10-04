@@ -1,3 +1,5 @@
+import type { QuotaLimit } from './models'
+
 export const quotaNames = ['Codex', 'Claude Code', 'Antigravity', 'Cursor', 'Command Code']
 export const usageNames = ['Codex', 'Claude Code', 'Cursor', 'Pi', 'OpenCode', 'DSH', 'Oh My Pi']
 export const quotaKeys = ['codex', 'claude', 'antigravity', 'cursor', 'commandcode']
@@ -50,6 +52,23 @@ export function relativeTime(value: string | undefined, english: boolean, now = 
       ? `${hours}${english ? 'h' : '小时'} ${minutes % 60}${english ? 'm' : '分'}`
       : `${minutes}${english ? 'm' : '分钟'}`
 }
+
+// quotaResetTime 根据服务返回的重置时间格式化额度说明
+export function quotaResetTime(
+  limit: QuotaLimit | undefined,
+  english: boolean,
+  absolute: boolean,
+  now = Date.now(),
+): string {
+  if (!limit) return '—'
+  const reset = limit.window.resetsAt
+  if (reset && Number.isFinite(new Date(reset).valueOf())) {
+    return absolute ? dateTime(reset, english, true) : relativeTime(reset, english, now)
+  }
+  if (limit.window.usedPercent > 0) return english ? 'Reset time pending' : '重置时间待更新'
+  return limit.isActive === false ? (english ? 'Not activated' : '尚未激活') : '—'
+}
+
 export function delta(value: number, previous: number): string | null {
   if (previous <= 0) return null
   const change = (value / previous - 1) * 100

@@ -235,7 +235,7 @@ func (store *Store) isManaged(profile ClaudeProfile) bool {
 	return profile.ID != "" && !strings.ContainsAny(profile.ID, "/\\") && sameDirectory(profile.ConfigDirectory, filepath.Join(store.dataDir, "claude-accounts", profile.ID))
 }
 
-// reloadClaudeLocked 读取官方轮换并保留未更新凭据的失效状态
+// reloadClaudeLocked 读取官方轮换并区分登录状态与额度凭据过期
 func (store *Store) reloadClaudeLocked(profile *ClaudeProfile) {
 	directory, _ := providers.ClaudePaths(store.home)
 	profile.IsActive = sameDirectory(profile.ConfigDirectory, directory) && profile.UsesDefaultConfig == (os.Getenv("CLAUDE_CONFIG_DIR") == "")
@@ -295,9 +295,14 @@ func (store *Store) reloadClaudeLocked(profile *ClaudeProfile) {
 		}
 		profile.CredentialsUpdatedAt = &written
 	}
-	if credential.ExpiresAt != nil && !credential.ExpiresAt.After(time.Now()) {
+	complete := hasCompleteCodeLogin(credential)
+	if complete && (profile.Error == "" || profile.Error == "启动 Claude Code 更新登录") {
+		profile.NeedsLogin = false
+		profile.Error = ""
+	}
+	if !complete && credential.ExpiresAt != nil && !credential.ExpiresAt.After(time.Now()) {
 		profile.NeedsLogin = true
-		profile.Error = "启动 Claude Code 更新登录"
+		profile.Error = "登录已过期"
 	}
 }
 
@@ -411,11 +416,6 @@ func (store *Store) RefreshClaude(ctx context.Context) error {
 			continue
 		}
 		if credential.ExpiresAt != nil && credential.ExpiresAt.Before(time.Now()) {
-			store.mu.Lock()
-			if index := store.claudeIndex(profile.ID); index >= 0 {
-				store.claude[index].Error = "启动 Claude Code 更新登录"
-			}
-			store.mu.Unlock()
 			continue
 		}
 		snapshot, fetchError := providers.Fetch(ctx, model.Claude, credential)
@@ -429,6 +429,7 @@ func (store *Store) RefreshClaude(ctx context.Context) error {
 			target := &store.claude[index]
 			if fetchError == nil {
 				target.Snapshot = preserveReset(snapshot, target.Snapshot)
+				target.NeedsLogin = false
 				target.Error = ""
 				target.BackoffUntil = nil
 			} else {

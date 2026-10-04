@@ -29,9 +29,9 @@ func (failure *Error) Error() string {
 	return failure.Kind + ": " + failure.Detail
 }
 
-// IsAuthFailure 判断登录失效
+// IsAuthFailure 区分认证失效与网络或权限错误
 func (failure *Error) IsAuthFailure() bool {
-	return failure.StatusCode == 401 || failure.StatusCode == 403
+	return failure.Kind == "authentication" || failure.StatusCode == 401 && failure.Kind != "proxy"
 }
 
 // HTTPClient 复用连接并保留系统代理
@@ -64,10 +64,14 @@ func requestJSON(ctx context.Context, method, url string, credential *model.Cred
 	}
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
 		detail := http.StatusText(response.StatusCode)
+		kind := "http"
 		if strings.HasPrefix(strings.TrimSpace(string(data)), "<") {
 			detail = "network proxy returned HTML"
+			kind = "proxy"
+		} else if root, err := DecodeObject(data); err == nil && str(obj(root["error"]), "type") == "authentication_error" {
+			kind = "authentication"
 		}
-		failure := &Error{Kind: "http", StatusCode: response.StatusCode, Detail: detail}
+		failure := &Error{Kind: kind, StatusCode: response.StatusCode, Detail: detail}
 		if parsed := num(object{"retry": response.Header.Get("Retry-After")}, "retry"); parsed != nil {
 			failure.RetryAfter = time.Duration(*parsed * float64(time.Second))
 		} else if date, err := http.ParseTime(response.Header.Get("Retry-After")); err == nil {

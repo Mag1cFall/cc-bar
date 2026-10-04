@@ -7,7 +7,32 @@ import (
 	"time"
 
 	"github.com/Mag1cFall/cc-bar/internal/model"
+	"github.com/Mag1cFall/cc-bar/internal/providers"
 )
+
+// TestClaudeWeeklyCycle 保留未起约束作用的已使用周额度周期
+func TestClaudeWeeklyCycle(t *testing.T) {
+	store, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	root, err := providers.DecodeObject([]byte(`{"seven_day":{"utilization":88,"resets_at":"2030-10-06T08:59:59.868657+08:00"},"limits":[{"kind":"weekly_all","percent":88,"resets_at":"2030-10-06T08:59:59.868657+08:00","is_active":false}]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot := providers.ParseClaude(root)
+	reset, _ := time.Parse(time.RFC3339Nano, "2030-10-06T08:59:59.868657+08:00")
+	if snapshot.PrimaryLimit == nil || snapshot.PrimaryLimit.Window.ResetsAt == nil || !snapshot.PrimaryLimit.Window.ResetsAt.Equal(reset) {
+		t.Fatal("周额度重置时间解析丢失")
+	}
+	if err = store.Record("claude:primary:weekly", model.Claude, *snapshot, "api", reset.Add(-time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	cycles := store.Cycles().Records
+	if len(cycles) != 1 || cycles[0].LimitKind != model.Weekly || cycles[0].LatestUsedPercent != 88 || !cycles[0].EndAt.Equal(reset) {
+		t.Fatalf("周额度周期丢失: %+v", cycles)
+	}
+}
 
 // TestAccountCycles 验证额外重置与导入账号的时间线分区
 func TestAccountCycles(t *testing.T) {

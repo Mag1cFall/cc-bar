@@ -14,6 +14,7 @@ import (
 	"slices"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/Mag1cFall/cc-bar/internal/providers"
 	_ "modernc.org/sqlite"
@@ -21,12 +22,60 @@ import (
 
 var desktopSessionPaths = []string{"Local State", "Network"}
 
+// desktopCookieState 记录 Cookie 数据库与 WAL 的实际写入时间
+type desktopCookieState struct {
+	cookiesWrittenAt time.Time
+	walWrittenAt     time.Time
+}
+
+// readDesktopCookieState 检查 Cookie 持久化文件与未完成的回滚日志
+func readDesktopCookieState(directory string) (desktopCookieState, bool) {
+	var state desktopCookieState
+	for _, name := range []string{"Cookies", "Cookies-wal"} {
+		info, err := os.Stat(filepath.Join(directory, "Network", name))
+		if os.IsNotExist(err) {
+			continue
+		}
+		if err != nil || !info.Mode().IsRegular() {
+			return state, false
+		}
+		if name == "Cookies" && info.Size() > 0 {
+			state.cookiesWrittenAt = info.ModTime()
+		} else if name == "Cookies-wal" && info.Size() > 32 {
+			state.walWrittenAt = info.ModTime()
+		}
+	}
+	journal, err := os.Stat(filepath.Join(directory, "Network", "Cookies-journal"))
+	if err != nil && !os.IsNotExist(err) || err == nil && journal.Size() != 0 {
+		return state, false
+	}
+	return state, !state.cookiesWrittenAt.IsZero()
+}
+
+// persisted 在 Cookie 库被运行中的浏览器锁定时等待实际刷盘
+func (baseline *desktopCookieState) persisted(directory string) bool {
+	current, committed := readDesktopCookieState(directory)
+	if !committed {
+		return false
+	}
+	if desktopWebSession(directory) {
+		return true
+	}
+	if baseline.cookiesWrittenAt.IsZero() {
+		*baseline = current
+		return false
+	}
+	return current.cookiesWrittenAt.After(baseline.cookiesWrittenAt) || current.walWrittenAt.After(baseline.walWrittenAt)
+}
+
 // desktopWebSession 检查原生 Cookie 库是否包含网页登录凭据
 func desktopWebSession(directory string) bool {
 	path := filepath.Join(directory, "Network", "Cookies")
-	if _, err := os.Stat(path); err != nil {
+	file, err := os.Open(path)
+	if err != nil {
 		return false
 	}
+	file.Close()
 	database, err := sql.Open("sqlite", "file:"+filepath.ToSlash(path)+"?mode=ro")
 	if err != nil {
 		return false
@@ -130,7 +179,14 @@ do {
 $main = Get-Process -Id $rootId -ErrorAction SilentlyContinue
 if ($main -and -not $main.HasExited -and $main.Path -ieq $expected) {
     try {
-        if ($main.CloseMainWindow()) { $null = $main.WaitForExit(5000) }
+        if ($main.CloseMainWindow()) {
+            $deadline = [DateTime]::UtcNow.AddSeconds(5)
+            do {
+                $main.Refresh()
+                if ($main.HasExited -or $main.MainWindowHandle -eq [IntPtr]::Zero) { break }
+                if ($main.WaitForExit(50)) { break }
+            } while ([DateTime]::UtcNow -lt $deadline)
+        }
     } catch { if (-not $main.HasExited) { throw } }
 }
 $processes = @($owned | ForEach-Object { Get-Process -Id $_ -ErrorAction SilentlyContinue })

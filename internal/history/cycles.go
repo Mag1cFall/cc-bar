@@ -165,7 +165,7 @@ func (store *Store) recordCycles(key string, app model.UsageApp, snapshot model.
 		store.cycles.AccountSegments = append(store.cycles.AccountSegments, AccountSegment{fmt.Sprintf("%d|%s|%d", app, key, at.Unix()), key, app, start, nil})
 	}
 	for _, limit := range []*model.QuotaLimit{snapshot.PrimaryLimit, snapshot.SecondaryLimit} {
-		if limit == nil || limit.Window.ResetsAt == nil || (limit.IsActive != nil && !*limit.IsActive) || (limit.Kind != model.FiveHour && limit.Kind != model.Weekly) {
+		if limit == nil || limit.Window.ResetsAt == nil || (limit.Kind != model.FiveHour && limit.Kind != model.Weekly) {
 			continue
 		}
 		end := *limit.Window.ResetsAt
