@@ -31,18 +31,25 @@ type Host struct {
 	lastMenu        string
 	menuMu          sync.Mutex
 	ready           atomic.Bool
+	mainReady       atomic.Bool
+	hudReady        atomic.Bool
+	openOnReady     atomic.Bool
 	popoverClosedAt atomic.Int64
 	background      application.RGBA
 }
 
 // Run 运行内嵌前端的单实例桌面应用
-func Run(service *app.Service, logger *slog.Logger) error {
+func Run(service *app.Service, logger *slog.Logger, browserPath string, closeProgress func()) error {
 	assets, err := web.Assets()
 	if err != nil {
 		return err
 	}
 	host := &Host{service: service}
+	settings := service.GetSnapshot().Settings
+	backgroundLaunch := settings.DidCompleteOnboarding && hasBackgroundArgument(os.Args[1:])
+	host.openOnReady.Store(!backgroundLaunch)
 	windows := platformOptions(service)
+	windows.WebviewBrowserPath = browserPath
 	windows.AdditionalBrowserArgs = []string{"--disk-cache-size=33554432"}
 	if port := os.Getenv("CCBAR_DEBUG_PORT"); port != "" {
 		if number, parseErr := strconv.Atoi(port); parseErr == nil && number > 1024 && number < 65536 {
@@ -58,14 +65,27 @@ func Run(service *app.Service, logger *slog.Logger) error {
 		Assets:      application.AssetOptions{Handler: application.BundledAssetFileServer(assets), DisableLogging: true},
 		Logger:      logger,
 		LogLevel:    slog.LevelWarn,
+		ErrorHandler: func(err error) {
+			logger.Error("界面错误", "error", err)
+			closeProgress()
+			ReportStartupError(err)
+		},
 		SingleInstance: &application.SingleInstanceOptions{
-			UniqueID:               "ccbar-windows-go",
-			OnSecondInstanceLaunch: func(application.SecondInstanceData) { host.ShowMain("overview") },
+			UniqueID: "ccbar-windows-go",
+			OnSecondInstanceLaunch: func(data application.SecondInstanceData) {
+				if hasBackgroundArgument(data.Args) {
+					return
+				}
+				host.openOnReady.Store(true)
+				if host.mainReady.Load() {
+					host.PresentMain()
+					host.ShowMain("overview")
+				}
+			},
 		},
 		OnShutdown: func() { service.Stop() },
 	})
 	service.AttachDesktop(host)
-	settings := service.GetSnapshot().Settings
 	host.background = windowBackground(settings.Theme)
 	width, height := 1600, 1100
 	if screen := host.application.Screen.GetPrimary(); screen != nil {
@@ -75,18 +95,30 @@ func Run(service *app.Service, logger *slog.Logger) error {
 	host.main = host.application.Window.NewWithOptions(application.WebviewWindowOptions{
 		Name: "main", Title: "CCBar", URL: "/?window=main", Width: width, Height: height, MinWidth: 1040, MinHeight: 520,
 		Frameless:        true,
-		Hidden:           settings.DidCompleteOnboarding && hasBackgroundArgument(),
+		Hidden:           backgroundLaunch,
 		BackgroundColour: host.background,
 	})
-	host.main.RegisterHook(events.Common.WindowClosing, func(event *application.WindowEvent) { hideSurface(host.main); event.Cancel() })
-	host.main.OnWindowEvent(events.Common.WindowRuntimeReady, func(*application.WindowEvent) { prepareSurface(host.main) })
+	host.main.RegisterHook(events.Common.WindowClosing, func(event *application.WindowEvent) {
+		host.openOnReady.Store(false)
+		hideSurface(host.main)
+		event.Cancel()
+	})
+	host.main.OnWindowEvent(events.Common.WindowRuntimeReady, func(*application.WindowEvent) {
+		host.mainReady.Store(true)
+		host.registerPlatformEvents()
+		prepareSurface(host.main, backgroundLaunch && !host.openOnReady.Load())
+		if host.openOnReady.Load() {
+			host.PresentMain()
+		}
+		closeProgress()
+	})
 	host.popover = host.application.Window.NewWithOptions(application.WebviewWindowOptions{
 		Name: "popover", Title: "CCBar", URL: "/?window=popover", Width: 360, Height: 520,
 		Frameless: true, DisableResize: true, AlwaysOnTop: true, Hidden: true,
 		Windows:          application.WindowsWindow{HiddenOnTaskbar: true},
 		BackgroundColour: host.background,
 	})
-	host.popover.OnWindowEvent(events.Common.WindowRuntimeReady, func(*application.WindowEvent) { prepareSurface(host.popover) })
+	host.popover.OnWindowEvent(events.Common.WindowRuntimeReady, func(*application.WindowEvent) { prepareSurface(host.popover, true) })
 	host.popover.OnWindowEvent(events.Common.WindowLostFocus, func(*application.WindowEvent) {
 		if host.popover.IsVisible() {
 			host.popoverClosedAt.Store(time.Now().UnixNano())
@@ -100,6 +132,10 @@ func Run(service *app.Service, logger *slog.Logger) error {
 		BackgroundType: application.BackgroundTypeTransparent,
 	})
 	host.hud.OnWindowEvent(events.Windows.WindowEndMove, func(*application.WindowEvent) { host.persistHudPosition() })
+	host.hud.OnWindowEvent(events.Common.WindowRuntimeReady, func(*application.WindowEvent) {
+		host.hudReady.Store(true)
+		host.applyHUD(host.service.GetSnapshot().Settings)
+	})
 	host.tray = host.application.SystemTray.New()
 	host.tray.SetIcon(appIcon())
 	host.tray.AttachWindow(host.popover).WindowOffset(6)
@@ -107,7 +143,6 @@ func Run(service *app.Service, logger *slog.Logger) error {
 	host.tray.OnDoubleClick(func() { host.ShowMain("overview") })
 	host.application.Event.OnApplicationEvent(events.Windows.ApplicationStarted, func(*application.ApplicationEvent) {
 		host.ready.Store(true)
-		host.registerPlatformEvents()
 		_ = host.ApplySettings(settings)
 		host.Changed()
 		service.Start()
@@ -118,8 +153,8 @@ func Run(service *app.Service, logger *slog.Logger) error {
 	return host.application.Run()
 }
 
-func hasBackgroundArgument() bool {
-	for _, argument := range os.Args[1:] {
+func hasBackgroundArgument(arguments []string) bool {
+	for _, argument := range arguments {
 		if argument == "--background" {
 			return true
 		}
@@ -226,6 +261,10 @@ func (host *Host) ShowMain(page string) {
 
 // PresentMain 显示已经完成导航的主窗口并收起托盘弹窗
 func (host *Host) PresentMain() {
+	host.openOnReady.Store(true)
+	if host.main.IsMinimised() {
+		host.main.UnMinimise()
+	}
 	if !host.main.IsVisible() {
 		host.main.Show()
 	}
@@ -251,6 +290,15 @@ func (host *Host) ApplySettings(settings model.Settings) error {
 	if err := setLaunchAtLogin(settings.LaunchAtLogin); err != nil {
 		return err
 	}
+	if host.hudReady.Load() {
+		host.applyHUD(settings)
+	}
+	host.Changed()
+	return nil
+}
+
+// applyHUD 在悬浮窗创建完成后应用位置与可见状态
+func (host *Host) applyHUD(settings model.Settings) {
 	if settings.FloatingEnabled {
 		if settings.HudLeft != nil && settings.HudTop != nil {
 			host.hud.SetPosition(int(*settings.HudLeft), int(*settings.HudTop))
@@ -261,8 +309,6 @@ func (host *Host) ApplySettings(settings model.Settings) error {
 	} else {
 		host.hud.Hide()
 	}
-	host.Changed()
-	return nil
 }
 
 func (host *Host) placeHud() {

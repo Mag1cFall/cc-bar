@@ -20,17 +20,22 @@ CCBar 自动读取本机已登录工具的额度，以及编程工具保存的�
 
 | 用途 | 需要准备 |
 | --- | --- |
-| 运行 CCBar | Windows 10/11 x64、`CCBar.exe`、Microsoft Edge WebView2 Runtime |
+| 运行 CCBar | Windows 10 1709+ / Windows 11（x64 或 ARM64）与对应架构的 EXE |
 | 查看服务额度 | 对应工具已在本机登录，网络能访问该服务 |
 | 查看日志统计 | 对应编程工具在本机运行并保存会话记录 |
 | 管理 Claude 账号 | 添加账号时完成官方授权；同步 Desktop 需要已安装 Claude Desktop，启动 CLI 需要 Claude Code CLI |
 | 从源码构建 | Go 1.25+、Node.js 24、PowerShell 7 |
 
-WebView2 是 Windows 上显示界面的运行库。缺少时，从 [Microsoft 官方页面](https://developer.microsoft.com/microsoft-edge/webview2/)安装 Evergreen Runtime。
+EXE 内置 Microsoft WebView2 固定版运行库，首次启动自动释放到应用数据目录，后续启动直接复用。运行 CCBar 无需预装 Edge 或系统 WebView2，首次释放运行库也可离线完成。
 
 ## 快速开始
 
-1. [下载 CCBar.exe](https://github.com/Mag1cFall/cc-bar/releases/latest/download/CCBar.exe)，放在希望长期使用的目录，双击运行。
+| 电脑类型 | 下载文件 |
+| --- | --- |
+| Intel / AMD 的 64 位电脑 | [CCBar.exe](https://github.com/Mag1cFall/cc-bar/releases/latest/download/CCBar.exe) |
+| ARM64 电脑 | [CCBar-arm64.exe](https://github.com/Mag1cFall/cc-bar/releases/latest/download/CCBar-arm64.exe) |
+
+1. 下载对应 EXE，放在希望长期使用的目录，双击打开主窗口。
 2. 首次引导中启用所需服务，选择托盘与悬浮窗的展示位置。
 3. 在对应编程工具中完成登录或产生会话记录后，CCBar 会读取额度和统计。
 4. 单击右下角托盘图标查看额度；双击打开统计窗口。托盘图标可能位于 Windows 的折叠区域。
@@ -96,10 +101,15 @@ New-Item -ItemType Directory -Path dist -Force
 & $wails generate icons -input internal/desktop/assets/icon.png -windowsfilename dist/icon.ico -macfilename ''
 & $wails generate syso -arch amd64 -icon dist/icon.ico -manifest cmd/ccbar/windows.manifest -info cmd/ccbar/version.json -out cmd/ccbar/rsrc_windows_amd64.syso
 $env:CGO_ENABLED = '0'
+$env:GOOS = 'windows'
+$env:GOARCH = 'amd64'
+Invoke-WebRequest -Uri 'https://msedge.sf.dl.delivery.mp.microsoft.com/filestreamingservice/files/0b89c3a3-0043-4746-b39e-65830da7744d/Microsoft.WebView2.FixedVersionRuntime.154.0.4258.53.x64.cab' -OutFile internal/browser/runtime.cab
 go build -trimpath -tags production -ldflags '-s -w -H windowsgui' -o dist/CCBar.exe ./cmd/ccbar
 ```
 
-产物为 `dist/CCBar.exe`，前端已内嵌。
+产物为 `dist/CCBar.exe`，前端和固定版运行库已内嵌。运行库采用微软官方 Fixed Version 154.0.4258.53；其他架构的运行库可从 [Microsoft 官方下载页](https://developer.microsoft.com/microsoft-edge/webview2/) 获取。
+
+构建 ARM64 时，将对应 ARM64 CAB 保存为 `internal/browser/runtime.cab`，资源生成参数使用 `-arch arm64 -out cmd/ccbar/rsrc_windows_arm64.syso`，设置 `$env:GOARCH = 'arm64'`，输出文件使用 `dist/CCBar-arm64.exe`。
 
 `windows.manifest` 和 `version.json` 是生成 EXE 资源的固定输入，分别提供权限与 DPI 清单、文件版本和名称。运行发布版时双击 `CCBar.exe` 即可。
 
@@ -146,9 +156,16 @@ cc-bar/
 │   ├── desktop/                  原生桌面窗口与托盘
 │   │   ├── desktop.go            主窗口、托盘弹窗与悬浮窗
 │   │   ├── platform_windows.go   登录启动、系统事件与目录打开
+│   │   ├── startup_windows.go    原生启动提示与错误显示
+│   │   ├── desktop_test.go        启动方式检查
 │   │   ├── icon.go               内嵌应用图标
 │   │   └── assets/
 │   │       └── icon.png          应用图标源文件
+│   ├── browser/                  随包界面运行库
+│   │   ├── runtime.go            固定运行库版本与官方来源
+│   │   ├── runtime_windows.go    内嵌运行库释放与复用
+│   │   ├── runtime_windows_test.go 离线释放与并发复用检查
+│   │   └── runtime.cab           对应架构的微软 Fixed Version 包
 │   ├── accounts/                 多账号与共享会话
 │   │   ├── store.go              账号存储、登录状态与额度刷新
 │   │   ├── types.go              Claude 与 Codex 账号类型

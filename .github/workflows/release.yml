@@ -30,10 +30,10 @@ jobs:
           npm ci
           npm run lint
           npm run build
-      - name: EXE 构建
+      - name: EXE 构建与关键行为检查
         shell: pwsh
         run: |
-          $version = '0.1.1'
+          $version = '0.1.2'
           if ($env:GITHUB_REF_TYPE -eq 'tag') { $version = $env:GITHUB_REF_NAME.TrimStart('v') }
           $ErrorActionPreference = 'Stop'
           $PSNativeCommandUseErrorActionPreference = $true
@@ -47,16 +47,31 @@ jobs:
           $info.info['0409'].FileVersion = "$version.0"
           $info | ConvertTo-Json -Depth 8 | Set-Content dist/version.json -Encoding utf8NoBOM
           & $wails generate icons -input internal/desktop/assets/icon.png -windowsfilename dist/icon.ico -macfilename ''
-          & $wails generate syso -arch amd64 -icon dist/icon.ico -manifest cmd/ccbar/windows.manifest -info dist/version.json -out cmd/ccbar/rsrc_windows_amd64.syso
           $env:CGO_ENABLED = '0'
-          go build -mod=readonly -trimpath -tags production -ldflags "-s -w -H windowsgui -X main.version=$version" -o dist/CCBar.exe ./cmd/ccbar
-      - name: 关键行为检查
-        run: go test ./internal/app ./internal/accounts ./internal/providers ./internal/usage ./internal/history
+          $env:GOOS = 'windows'
+          $targets = @(
+            @{ Architecture = 'amd64'; Filename = 'CCBar.exe'; URL = 'https://msedge.sf.dl.delivery.mp.microsoft.com/filestreamingservice/files/0b89c3a3-0043-4746-b39e-65830da7744d/Microsoft.WebView2.FixedVersionRuntime.154.0.4258.53.x64.cab' },
+            @{ Architecture = 'arm64'; Filename = 'CCBar-arm64.exe'; URL = 'https://msedge.sf.dl.delivery.mp.microsoft.com/filestreamingservice/files/dc564291-b964-4df6-82ac-3079d17698cb/Microsoft.WebView2.FixedVersionRuntime.154.0.4258.53.arm64.cab' }
+          )
+          foreach ($target in $targets) {
+            Invoke-WebRequest -Uri $target.URL -OutFile internal/browser/runtime.cab
+            $info.info['0409'].OriginalFilename = $target.Filename
+            $info | ConvertTo-Json -Depth 8 | Set-Content dist/version.json -Encoding utf8NoBOM
+            & $wails generate syso -arch $target.Architecture -icon dist/icon.ico -manifest cmd/ccbar/windows.manifest -info dist/version.json -out "cmd/ccbar/rsrc_windows_$($target.Architecture).syso"
+            $env:GOARCH = $target.Architecture
+            go build -mod=readonly -trimpath -tags production -ldflags "-s -w -H windowsgui -X main.version=$version" -o "dist/$($target.Filename)" ./cmd/ccbar
+            if ($target.Architecture -eq 'amd64') {
+              go test ./internal/app ./internal/accounts ./internal/browser ./internal/desktop ./internal/providers ./internal/usage ./internal/history
+            }
+          }
+          $env:GOARCH = 'amd64'
       - uses: actions/upload-artifact@v7
         with:
           name: CCBar-Windows
+          compression-level: 0
           path: |
             dist/CCBar.exe
+            dist/CCBar-arm64.exe
             LICENSE
 
   release:
@@ -77,7 +92,7 @@ jobs:
         run: |
           gh release view $env:GITHUB_REF_NAME --repo $env:GITHUB_REPOSITORY 2>$null | Out-Null
           if ($LASTEXITCODE -eq 0) {
-            gh release upload $env:GITHUB_REF_NAME release/dist/CCBar.exe release/LICENSE --repo $env:GITHUB_REPOSITORY --clobber
+            gh release upload $env:GITHUB_REF_NAME release/dist/CCBar.exe release/dist/CCBar-arm64.exe release/LICENSE --repo $env:GITHUB_REPOSITORY --clobber
           } else {
-            gh release create $env:GITHUB_REF_NAME release/dist/CCBar.exe release/LICENSE --repo $env:GITHUB_REPOSITORY --title $env:GITHUB_REF_NAME --generate-notes
+            gh release create $env:GITHUB_REF_NAME release/dist/CCBar.exe release/dist/CCBar-arm64.exe release/LICENSE --repo $env:GITHUB_REPOSITORY --title $env:GITHUB_REF_NAME --generate-notes
           }

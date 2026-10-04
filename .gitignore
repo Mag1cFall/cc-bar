@@ -20,3 +20,4 @@ tokens.json
 secrets.json
 usage.db*
 quota-cache.json
+internal/browser/runtime.cab

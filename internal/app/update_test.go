@@ -2,10 +2,13 @@ package app
 
 import (
 	"context"
+	"debug/pe"
+	"encoding/binary"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 )
 
@@ -33,16 +36,28 @@ func TestWindowsUpdate(t *testing.T) {
 		URL  string `json:"browser_download_url"`
 		Size int64  `json:"size"`
 	}{"CCBar.exe", "https://github.com/Mag1cFall/cc-bar/releases/download/v0.2.0/CCBar.exe", 1024})
-	selected, _, err := selectUpdate(release, "0.1.0")
+	selected, _, err := selectUpdate(release, "0.1.0", "amd64")
 	if err != nil || selected.Status != "available" || selected.LatestVersion != "0.2.0" {
 		t.Fatalf("正式 Windows 版本选择: %+v, %v", selected, err)
 	}
+	release.Assets = append(release.Assets, release.Assets[0])
+	release.Assets[1].Name = "CCBar-arm64.exe"
+	release.Assets[1].URL = "https://github.com/Mag1cFall/cc-bar/releases/download/v0.2.0/CCBar-arm64.exe"
+	for _, sample := range []struct {
+		architecture string
+		filename     string
+	}{{"amd64", "CCBar.exe"}, {"arm64", "CCBar-arm64.exe"}} {
+		selected, address, selectionErr := selectUpdate(release, "0.1.0", sample.architecture)
+		if selectionErr != nil || selected.Status != "available" || address != "https://github.com/Mag1cFall/cc-bar/releases/download/v0.2.0/"+sample.filename {
+			t.Fatalf("%s 更新选择: %+v, %s, %v", sample.architecture, selected, address, selectionErr)
+		}
+	}
 	release.Assets[0].URL = "https://github.com/nanvon/cc-bar/releases/download/v0.2.0/CCBar.exe"
-	if _, _, err = selectUpdate(release, "0.1.0"); err == nil {
+	if _, _, err = selectUpdate(release, "0.1.0", "amd64"); err == nil {
 		t.Fatal("错误仓库的更新文件被选中")
 	}
 	release.Assets[0].Name = "CCBar.dmg"
-	selected, _, err = selectUpdate(release, "0.1.0")
+	selected, _, err = selectUpdate(release, "0.1.0", "amd64")
 	if err != nil || selected.Status != "unpublished" {
 		t.Fatalf("尚未发布 Windows 产物: %+v, %v", selected, err)
 	}
@@ -71,6 +86,25 @@ func TestWindowsUpdate(t *testing.T) {
 	staged := filepath.Join(directory, "CCBar.exe")
 	if err = downloadUpdate(context.Background(), server.URL, staged, image.Size()); err != nil {
 		t.Fatal(err)
+	}
+	wrongArchitecture := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		data, readErr := os.ReadFile(executable)
+		if readErr != nil {
+			t.Error(readErr)
+			writer.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		machine := uint16(pe.IMAGE_FILE_MACHINE_ARM64)
+		if runtime.GOARCH == "arm64" {
+			machine = pe.IMAGE_FILE_MACHINE_AMD64
+		}
+		imageOffset := binary.LittleEndian.Uint32(data[0x3c:0x40])
+		binary.LittleEndian.PutUint16(data[imageOffset+4:imageOffset+6], machine)
+		_, _ = writer.Write(data)
+	}))
+	defer wrongArchitecture.Close()
+	if err = downloadUpdate(context.Background(), wrongArchitecture.URL, filepath.Join(directory, "wrong.exe"), image.Size()); err == nil {
+		t.Fatal("更新接受了其他架构的 EXE")
 	}
 	if err = replaceUpdateExecutable(staged, target); err != nil {
 		t.Fatal(err)

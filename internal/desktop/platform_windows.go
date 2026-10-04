@@ -37,12 +37,12 @@ type powerNotification struct {
 }
 
 // prepareSurface 在不可见状态预热页面并设置窗口显示行为
-func prepareSurface(window *application.WebviewWindow) {
+func prepareSurface(window *application.WebviewWindow, hidden bool) {
 	application.InvokeSync(func() {
 		handle := uintptr(window.NativeWindow())
 		var enabled int32 = 1
 		_, _, _ = setWindowAttribute.Call(handle, dwmTransitionsForcedDisabled, uintptr(unsafe.Pointer(&enabled)), unsafe.Sizeof(enabled))
-		if window.IsVisible() {
+		if !hidden || window.IsVisible() {
 			return
 		}
 		_, _, _ = setWindowAttribute.Call(handle, dwmCloak, uintptr(unsafe.Pointer(&enabled)), unsafe.Sizeof(enabled))

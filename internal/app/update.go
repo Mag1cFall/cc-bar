@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -22,7 +23,7 @@ import (
 
 const updateRepository = "Mag1cFall/cc-bar"
 const updateDirectoryPrefix = ".ccbar-update-"
-const maximumUpdateSize = 256 << 20
+const maximumUpdateSize = 512 << 20
 
 var updateInstallGate sync.Mutex
 var updateStartupError string
@@ -87,10 +88,10 @@ func findUpdate(ctx context.Context, current string) (ReleaseUpdate, string, err
 	if err = json.NewDecoder(io.LimitReader(response.Body, 2<<20)).Decode(&release); err != nil {
 		return result, "", fmt.Errorf("读取发布信息: %w", err)
 	}
-	return selectUpdate(release, current)
+	return selectUpdate(release, current, runtime.GOARCH)
 }
 
-func selectUpdate(release githubRelease, current string) (ReleaseUpdate, string, error) {
+func selectUpdate(release githubRelease, current, architecture string) (ReleaseUpdate, string, error) {
 	result := ReleaseUpdate{CurrentVersion: current, Status: "unpublished"}
 	if release.Draft || release.Prerelease {
 		return result, "", nil
@@ -99,12 +100,16 @@ func selectUpdate(release githubRelease, current string) (ReleaseUpdate, string,
 	if err != nil {
 		return result, "", err
 	}
+	filename := "CCBar.exe"
+	if architecture == "arm64" {
+		filename = "CCBar-arm64.exe"
+	}
 	for _, asset := range release.Assets {
-		if asset.Name != "CCBar.exe" {
+		if asset.Name != filename {
 			continue
 		}
 		parsed, parseErr := url.Parse(asset.URL)
-		expectedPath := "/" + updateRepository + "/releases/download/" + release.Tag + "/CCBar.exe"
+		expectedPath := "/" + updateRepository + "/releases/download/" + release.Tag + "/" + filename
 		if parseErr != nil || parsed.Scheme != "https" || parsed.Host != "github.com" || parsed.Path != expectedPath || parsed.RawQuery != "" || asset.Size <= 0 || asset.Size > maximumUpdateSize {
 			return result, "", errors.New("发布版的 Windows 下载信息有误")
 		}
@@ -203,7 +208,7 @@ func (service *Service) InstallUpdate(ctx context.Context) error {
 }
 
 func downloadUpdate(ctx context.Context, address, destination string, expectedSize int64) error {
-	ctx, cancel := context.WithTimeout(ctx, 5*time.Minute)
+	ctx, cancel := context.WithTimeout(ctx, 20*time.Minute)
 	defer cancel()
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, address, nil)
 	if err != nil {
@@ -237,8 +242,12 @@ func downloadUpdate(ctx context.Context, address, destination string, expectedSi
 		return fmt.Errorf("读取 Windows 更新文件: %w", err)
 	}
 	defer image.Close()
-	if image.Machine != pe.IMAGE_FILE_MACHINE_AMD64 {
-		return errors.New("发布文件与 Windows x64 平台不匹配")
+	machine := uint16(pe.IMAGE_FILE_MACHINE_AMD64)
+	if runtime.GOARCH == "arm64" {
+		machine = pe.IMAGE_FILE_MACHINE_ARM64
+	}
+	if image.Machine != machine {
+		return errors.New("发布文件与当前 Windows 程序架构不匹配")
 	}
 	return nil
 }
