@@ -27,6 +27,7 @@ type Desktop interface {
 	PresentMain()
 	ApplySettings(model.Settings) error
 	OpenDirectory(string) error
+	OpenURL(string) error
 	ResizeSurface(context.Context, int, int)
 	HidePopover()
 	Quit()
@@ -44,6 +45,7 @@ type Snapshot struct {
 	Settings              model.Settings           `json:"settings"`
 	Providers             []model.ProviderState    `json:"providers"`
 	ClaudeAccounts        []accounts.ClaudeProfile `json:"claudeAccounts"`
+	ClaudeLogin           *accounts.ClaudeLogin    `json:"claudeLogin,omitempty"`
 	ImportedCodexAccounts []accounts.CodexAccount  `json:"importedCodexAccounts"`
 	ServiceStatuses       map[string]string        `json:"serviceStatuses"`
 	LocalServices         map[string]LocalService  `json:"localServices"`
@@ -139,6 +141,12 @@ func New(directory, home, version string, logger *slog.Logger) (*Service, error)
 	}
 	usageStore.OnChanged = service.changed
 	accountStore.Changed = service.changed
+	accountStore.LoginCompleted = func() {
+		service.background(func() {
+			_ = service.accounts.RefreshClaude(service.ctx)
+			service.RefreshQuotas()
+		})
+	}
 	return service, nil
 }
 
@@ -175,6 +183,7 @@ func (service *Service) Start() {
 // Stop 等待后台任务结束再关闭存储
 func (service *Service) Stop() {
 	service.cancel()
+	service.accounts.StopLogin()
 	service.workers.Wait()
 	service.mu.Lock()
 	if service.notifyTimer != nil {
@@ -219,6 +228,7 @@ func (service *Service) GetSnapshot() Snapshot {
 		result.Locale = systemLocale()
 	}
 	result.ClaudeAccounts = service.accounts.ListClaude()
+	result.ClaudeLogin = service.accounts.LoginStatus()
 	result.ImportedCodexAccounts = service.accounts.ListCodex()
 	result.Scan = service.usage.Status()
 	result.LocalServices = service.localServices()

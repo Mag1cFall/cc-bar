@@ -9,29 +9,33 @@ import (
 	"github.com/Mag1cFall/cc-bar/internal/providers"
 )
 
-// SaveClaudeAccount 保存当前 Claude Code 或 Desktop Code 登录
+// SaveClaudeAccount 保存当前账号的完整登录
 func (service *Service) SaveClaudeAccount() (*accounts.ClaudeProfile, error) {
 	profile, err := service.accounts.SaveCurrentClaude()
 	service.changed()
 	return profile, err
 }
 
-// AddClaudeAccount 创建独立的官方 CLI 登录目录
-func (service *Service) AddClaudeAccount(name string) (*accounts.ClaudeProfile, error) {
-	profile, err := service.accounts.AddClaude(name)
-	service.changed()
-	return profile, err
+// BeginClaudeLogin 从软件内开始原生登录并自动接收授权结果
+func (service *Service) BeginClaudeLogin(id string) (*accounts.ClaudeLogin, error) {
+	return service.accounts.BeginClaudeLogin(id, service.desktop.OpenURL)
 }
 
-// LoginClaudeAccount 在终端中运行官方登录流程
-func (service *Service) LoginClaudeAccount(ctx context.Context, id string) error {
-	err := service.accounts.LoginClaude(ctx, id)
-	service.changed()
-	service.RefreshQuotas()
-	return err
+// CancelClaudeLogin 取消登录并恢复此前的 Desktop 会话
+func (service *Service) CancelClaudeLogin() {
+	service.accounts.CancelClaudeLogin()
 }
 
-// SwitchClaudeAccount 切换官方配置目录并保留共享对话
+// OpenClaudeAuthorization 重新用系统浏览器打开当前授权页面
+func (service *Service) OpenClaudeAuthorization() error {
+	login := service.accounts.LoginStatus()
+	if login == nil || login.Stage != "browser" || login.URL == "" {
+		return nil
+	}
+	return service.desktop.OpenURL(login.URL)
+}
+
+// SwitchClaudeAccount 同步切换 Desktop 与 CLI 账号并保留共享对话
 func (service *Service) SwitchClaudeAccount(id string) error {
 	err := service.accounts.SwitchClaude(id)
 	if err != nil {

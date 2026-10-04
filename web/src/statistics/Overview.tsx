@@ -1,4 +1,6 @@
 import { useState, type CSSProperties } from 'react'
+import * as Collapsible from '@radix-ui/react-collapsible'
+import { ArrowDownWideNarrow, ChevronDown } from 'lucide-react'
 import { Bar, BarChart, CartesianGrid, Cell, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts'
 import { api } from '../bridge'
 import { Card, Empty, Logo, Progress, QueryState, Section, Segments, Select } from '../components'
@@ -70,7 +72,7 @@ export default function Overview({ query }: { query: UsageQuery }) {
                 <span style={{ flexGrow: data.totals.output || 1 }} />
                 <span style={{ flexGrow: data.totals.cacheRead || 1 }} />
               </div>
-              <TokenBreakdown totals={data.totals} extended />
+              <TokenBreakdown totals={data.totals} variant="full" />
               {data.fast.totals.tokens > 0 && (
                 <div className="fast-summary">
                   <div>
@@ -330,6 +332,7 @@ function GroupTable({
       actions={
         <Select
           label={tr('Sort by', '排序方式')}
+          icon={<ArrowDownWideNarrow size={14} />}
           value={sort}
           onChange={setSort}
           options={[
@@ -344,41 +347,49 @@ function GroupTable({
       <Card className="padded group-card">
         {ordered.length === 0 && <Empty title={tr('No data', '暂无数据')} />}
         {ordered.map((group) => (
-          <div key={group.id} className="group">
-            <button
-              className="group-heading"
-              onClick={() => setExpanded(expanded === group.id ? undefined : group.id)}
-              aria-expanded={expanded === group.id}
-            >
-              <span className="group-name">
-                {group.app !== undefined && <Logo name={usageKeys[group.app] ?? ''} size={18} />}
-                <strong>{group.name}</strong>
-                {group.speed && <span className="badge">{group.speed}</span>}
-              </span>
-              <span className="group-values numeric">
-                {compact(group.totals.tokens, english)} Tokens <strong>{money(group.totals.cost)}</strong>
-                <span className="disclosure">{expanded === group.id ? '⌃' : '⌄'}</span>
-              </span>
-            </button>
-            {(!expandable || expanded === group.id) && (
+          <Collapsible.Root
+            key={group.id}
+            className="group"
+            open={expanded === group.id}
+            onOpenChange={(open) => setExpanded(open ? group.id : undefined)}
+          >
+            <Collapsible.Trigger asChild>
+              <button className="group-heading" type="button">
+                <span className="group-name">
+                  {group.app !== undefined && <Logo name={usageKeys[group.app] ?? ''} size={18} />}
+                  <strong>{group.name}</strong>
+                  {group.speed && <span className="badge">{group.speed}</span>}
+                </span>
+                <span className="group-values numeric">
+                  <span>{compact(group.totals.tokens, english)} Tokens</span>{' '}
+                  <strong>{money(group.totals.cost)}</strong>
+                  <ChevronDown size={16} className="disclosure-chevron" />
+                </span>
+              </button>
+            </Collapsible.Trigger>
+            {!expandable && (
               <div className="group-details">
-                <TokenBreakdown totals={group.totals} extended={expanded === group.id} />
-                {expanded === group.id &&
-                  (group.models ?? []).map((model) => (
-                    <div className="submodel" key={model.id}>
-                      <div className="summary-heading">
-                        <span>{model.name}</span>
-                        {model.speed && <span className="badge">{model.speed}</span>}
-                        <strong className="numeric">
-                          {compact(model.totals.tokens, english)} · {money(model.totals.cost)}
-                        </strong>
-                      </div>
-                      <TokenBreakdown totals={model.totals} />
-                    </div>
-                  ))}
+                <TokenBreakdown totals={group.totals} />
               </div>
             )}
-          </div>
+            <Collapsible.Content className="disclosure-content">
+              <div className="group-expanded">
+                <TokenBreakdown totals={group.totals} variant={expandable ? 'full' : 'additional'} />
+                {(group.models ?? []).map((model) => (
+                  <div className="submodel" key={model.id}>
+                    <div className="summary-heading">
+                      <span>{model.name}</span>
+                      {model.speed && <span className="badge">{model.speed}</span>}
+                      <strong className="numeric">
+                        {compact(model.totals.tokens, english)} · {money(model.totals.cost)}
+                      </strong>
+                    </div>
+                    <TokenBreakdown totals={model.totals} />
+                  </div>
+                ))}
+              </div>
+            </Collapsible.Content>
+          </Collapsible.Root>
         ))}
       </Card>
     </Section>

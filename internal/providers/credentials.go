@@ -161,7 +161,7 @@ func ReadClaudeDesktop(cli *model.Credential) (*model.Credential, error) {
 		directories = append(directories, filepath.Join(item, "LocalCache", "Roaming", "Claude"))
 	}
 	for _, directory := range directories {
-		value, err := readDesktopDirectory(directory, cli)
+		value, err := ReadClaudeDesktopDirectory(directory, cli)
 		if err == nil && value != nil {
 			return value, nil
 		}
@@ -169,8 +169,8 @@ func ReadClaudeDesktop(cli *model.Credential) (*model.Credential, error) {
 	return nil, nil
 }
 
-// readDesktopDirectory 限定当前账号组织并解密桌面 OAuth 缓存
-func readDesktopDirectory(directory string, cli *model.Credential) (*model.Credential, error) {
+// ReadClaudeDesktopDirectory 读取指定 Desktop 会话目录的官方 OAuth 缓存
+func ReadClaudeDesktopDirectory(directory string, cli *model.Credential) (*model.Credential, error) {
 	state, err := readObject(filepath.Join(directory, "Local State"))
 	if err != nil {
 		return nil, err

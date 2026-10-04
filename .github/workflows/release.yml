@@ -33,7 +33,7 @@ jobs:
       - name: EXE 构建
         shell: pwsh
         run: |
-          $version = '0.1.0'
+          $version = '0.1.1'
           if ($env:GITHUB_REF_TYPE -eq 'tag') { $version = $env:GITHUB_REF_NAME.TrimStart('v') }
           $ErrorActionPreference = 'Stop'
           $PSNativeCommandUseErrorActionPreference = $true

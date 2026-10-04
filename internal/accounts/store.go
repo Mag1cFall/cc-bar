@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -18,12 +19,14 @@ import (
 
 // Store 管理官方 Claude 登录与导入 Codex 账号
 type Store struct {
-	mu            sync.Mutex
-	refreshMu     sync.Mutex
-	dataDir, home string
-	claude        []ClaudeProfile
-	codex         []CodexAccount
-	Changed       func()
+	mu             sync.Mutex
+	refreshMu      sync.Mutex
+	dataDir, home  string
+	claude         []ClaudeProfile
+	login          *loginAttempt
+	codex          []CodexAccount
+	Changed        func()
+	LoginCompleted func()
 }
 
 // New 加载原有 Windows 账号数据
@@ -66,10 +69,114 @@ func New(dataDir, home string) (*Store, error) {
 		return nil, err
 	}
 	for i := range store.claude {
+		if _, err := uuid.Parse(store.claude[i].ID); err != nil {
+			return nil, errors.New("已保存账号的标识格式有误")
+		}
+	}
+	if err := store.prunePartialClaude(); err != nil {
+		return nil, err
+	}
+	for i := range store.claude {
 		store.reloadClaudeLocked(&store.claude[i])
 		store.claude[i].IsLoggingIn = false
 	}
 	return store, nil
+}
+
+// prunePartialClaude 在完整 Desktop 登录模式下移除半套授权
+func (store *Store) prunePartialClaude() error {
+	if !slices.ContainsFunc(store.claude, func(profile ClaudeProfile) bool { return profile.DesktopSaved }) {
+		return nil
+	}
+	complete := make([]ClaudeProfile, 0, len(store.claude))
+	resetDefault := false
+	for _, profile := range store.claude {
+		if store.HasDesktopSession(profile) {
+			complete = append(complete, profile)
+			continue
+		}
+		resetDefault = resetDefault || sameDirectory(os.Getenv("CLAUDE_CONFIG_DIR"), profile.ConfigDirectory)
+		if err := store.discardPartialClaude(profile); err != nil {
+			return err
+		}
+	}
+	if len(complete) == len(store.claude) {
+		return nil
+	}
+	if resetDefault {
+		directory := ""
+		if len(complete) > 0 {
+			directory = complete[0].ConfigDirectory
+		}
+		if err := store.setClaudeDirectory(directory); err != nil {
+			return err
+		}
+	}
+	store.claude = complete
+	return store.saveClaudeLocked()
+}
+
+// discardPartialClaude 清除独立目录的半套授权并保留共享记录与偏好
+func (store *Store) discardPartialClaude(profile ClaudeProfile) error {
+	if !store.isManaged(profile) {
+		return nil
+	}
+	root, err := resolveDirectory(profile.ConfigDirectory)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if !sameDirectory(root, profile.ConfigDirectory) {
+		return errors.New("账号目录指向发生变化")
+	}
+	path := filepath.Join(root, ".credentials.json")
+	if info, err := os.Lstat(path); err == nil {
+		if !info.Mode().IsRegular() {
+			return errors.New("账号凭据文件类型有误")
+		}
+		if err := os.Remove(path); err != nil {
+			return err
+		}
+	} else if !os.IsNotExist(err) {
+		return err
+	}
+	path = filepath.Join(root, ".claude.json")
+	if info, err := os.Lstat(path); err == nil && !info.Mode().IsRegular() {
+		return errors.New("账号身份文件类型有误")
+	} else if err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	if data, err := os.ReadFile(path); err == nil {
+		identity, err := providers.DecodeObject(data)
+		if err != nil {
+			return err
+		}
+		delete(identity, "oauthAccount")
+		if err := providers.WriteJSON(path, identity); err != nil {
+			return err
+		}
+	} else if !os.IsNotExist(err) {
+		return err
+	}
+	saved := store.desktopSession(profile)
+	if _, err := os.Lstat(saved); os.IsNotExist(err) {
+		return nil
+	} else if err != nil {
+		return err
+	}
+	resolved, err := resolveDirectory(saved)
+	if err != nil {
+		return err
+	}
+	if !sameDirectory(resolved, saved) {
+		return errors.New("账号会话目录指向发生变化")
+	}
+	if err := checkSessionFiles(saved); err != nil {
+		return err
+	}
+	return os.RemoveAll(saved)
 }
 
 func (store *Store) notify() {
@@ -84,6 +191,7 @@ func (store *Store) saveClaudeLocked() error {
 		items[i].IsActive = false
 		items[i].Error = ""
 		items[i].HistoryShared = false
+		items[i].DesktopActive = false
 	}
 	return providers.WriteJSON(filepath.Join(store.dataDir, "claude-accounts.json"), items)
 }
@@ -132,9 +240,18 @@ func (store *Store) reloadClaudeLocked(profile *ClaudeProfile) {
 	directory, _ := providers.ClaudePaths(store.home)
 	profile.IsActive = sameDirectory(profile.ConfigDirectory, directory) && profile.UsesDefaultConfig == (os.Getenv("CLAUDE_CONFIG_DIR") == "")
 	profile.HistoryShared = profile.UsesDefaultConfig || historyLinked(profile.ConfigDirectory, filepath.Join(store.home, ".claude"))
+	profile.DesktopActive = profile.DesktopDirectory != "" && desktopIdentity(profile.DesktopDirectory) == profile.AccountUUID
 	credential, err := store.readClaude(*profile)
 	if profile.DesktopLinked && store.isManaged(*profile) {
-		desktop, desktopErr := providers.ReadClaudeDesktop(&model.Credential{AccountUUID: profile.AccountUUID, OrganizationUUID: profile.OrganizationUUID})
+		var desktop *model.Credential
+		var desktopErr error
+		if profile.DesktopDirectory != "" {
+			if profile.DesktopActive {
+				desktop, desktopErr = providers.ReadClaudeDesktopDirectory(profile.DesktopDirectory, &model.Credential{AccountUUID: profile.AccountUUID, OrganizationUUID: profile.OrganizationUUID})
+			}
+		} else {
+			desktop, desktopErr = providers.ReadClaudeDesktop(&model.Credential{AccountUUID: profile.AccountUUID, OrganizationUUID: profile.OrganizationUUID})
+		}
 		matchingDesktop := desktopErr == nil && desktop != nil && desktop.Source == "Claude Desktop Code" && desktop.AccountUUID == profile.AccountUUID
 		if matchingDesktop {
 			newerLogin := credential == nil || desktop.ExpiresAt != nil && (credential.ExpiresAt == nil || desktop.ExpiresAt.After(*credential.ExpiresAt))
@@ -190,12 +307,25 @@ func (store *Store) ListClaude() []ClaudeProfile {
 	defer store.mu.Unlock()
 	for i := range store.claude {
 		store.reloadClaudeLocked(&store.claude[i])
+		store.claude[i].IsLoggingIn = store.login != nil && store.login.AccountID == store.claude[i].ID && !slices.Contains([]string{"done", "error", "cancelled"}, store.login.Stage)
 	}
 	return append([]ClaudeProfile{}, store.claude...)
 }
 
 // SaveCurrentClaude 将当前官方登录加入列表
 func (store *Store) SaveCurrentClaude() (*ClaudeProfile, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	desktop, err := store.desktopApp(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if desktop != nil {
+		if desktopIdentity(desktop.Directory) == "" {
+			return nil, errors.New("请通过添加账号完成完整的 Desktop 登录")
+		}
+		return store.saveCurrentDesktop(desktop)
+	}
 	store.mu.Lock()
 	defer store.mu.Unlock()
 	directory, _ := providers.ClaudePaths(store.home)
@@ -213,20 +343,11 @@ func (store *Store) SaveCurrentClaude() (*ClaudeProfile, error) {
 	if err != nil {
 		return nil, err
 	}
-	if credential == nil || credential.ExpiresAt != nil && !credential.ExpiresAt.After(time.Now()) {
-		desktop, desktopErr := providers.ReadClaudeDesktop(credential)
-		if desktopErr != nil {
-			return nil, desktopErr
-		}
-		if desktop != nil {
-			profile, index, err = store.saveDesktopClaude(desktop)
-			if err != nil {
-				return nil, err
-			}
-			credential = desktop
-		} else if credential == nil {
-			return nil, errors.New("请先在 Claude Code 或 Claude Desktop 完成登录")
-		}
+	if credential == nil {
+		return nil, errors.New("请先在 Claude Code 或 Claude Desktop 完成登录")
+	}
+	if !hasCompleteCodeLogin(credential) {
+		return nil, errors.New("当前 Code 授权尚未完整，请通过添加账号重新授权")
 	}
 	if profile.Name == "" {
 		profile.Name = strings.Split(credential.Email, "@")[0]
@@ -240,29 +361,6 @@ func (store *Store) SaveCurrentClaude() (*ClaudeProfile, error) {
 	} else {
 		store.claude[index] = profile
 	}
-	if err := store.saveClaudeLocked(); err != nil {
-		return nil, err
-	}
-	return &profile, nil
-}
-
-// AddClaude 为新账号创建独立官方目录
-func (store *Store) AddClaude(name string) (*ClaudeProfile, error) {
-	store.mu.Lock()
-	defer store.mu.Unlock()
-	profile := ClaudeProfile{ID: strings.ReplaceAll(uuid.NewString(), "-", ""), Name: strings.TrimSpace(name), NeedsLogin: true}
-	if profile.Name == "" {
-		profile.Name = "新账号"
-	}
-	profile.ConfigDirectory = filepath.Join(store.dataDir, "claude-accounts", profile.ID)
-	if err := os.MkdirAll(profile.ConfigDirectory, 0700); err != nil {
-		return nil, err
-	}
-	if err := prepareHistory(profile.ConfigDirectory, filepath.Join(store.home, ".claude")); err != nil {
-		return nil, err
-	}
-	profile.HistoryShared = true
-	store.claude = append(store.claude, profile)
 	if err := store.saveClaudeLocked(); err != nil {
 		return nil, err
 	}

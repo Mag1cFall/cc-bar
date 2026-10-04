@@ -13,6 +13,9 @@ type ClaudeProfile struct {
 	ConfigDirectory      string               `json:"configDirectory"`
 	UsesDefaultConfig    bool                 `json:"usesDefaultConfig"`
 	DesktopLinked        bool                 `json:"desktopLinked,omitempty"`
+	DesktopDirectory     string               `json:"desktopDirectory,omitempty"`
+	DesktopSaved         bool                 `json:"desktopSaved,omitempty"`
+	DesktopActive        bool                 `json:"desktopActive"`
 	CredentialsUpdatedAt *time.Time           `json:"credentialsUpdatedAt,omitempty"`
 	Email                string               `json:"email,omitempty"`
 	AccountUUID          string               `json:"accountUuid,omitempty"`
@@ -25,6 +28,16 @@ type ClaudeProfile struct {
 	IsLoggingIn          bool                 `json:"isLoggingIn"`
 	IsActive             bool                 `json:"isActive"`
 	HistoryShared        bool                 `json:"historyShared"`
+}
+
+// ClaudeLogin 返回当前登录或切换过程的界面状态
+type ClaudeLogin struct {
+	ID        string `json:"id"`
+	AccountID string `json:"accountId,omitempty"`
+	Stage     string `json:"stage"`
+	URL       string `json:"url,omitempty"`
+	Error     string `json:"error,omitempty"`
+	Mode      string `json:"mode"`
 }
 
 // CodexAccount 表示仅查看额度的导入账号

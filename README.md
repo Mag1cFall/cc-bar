@@ -23,7 +23,7 @@ CCBar 自动读取本机已登录工具的额度，以及编程工具保存的�
 | 运行 CCBar | Windows 10/11 x64、`CCBar.exe`、Microsoft Edge WebView2 Runtime |
 | 查看服务额度 | 对应工具已在本机登录，网络能访问该服务 |
 | 查看日志统计 | 对应编程工具在本机运行并保存会话记录 |
-| 管理 Claude 账号 | 本机已安装 Claude Code CLI；导入 Desktop 登录需要已启用 Desktop 的 Code 功能 |
+| 管理 Claude 账号 | 添加账号时完成官方授权；同步 Desktop 需要已安装 Claude Desktop，启动 CLI 需要 Claude Code CLI |
 | 从源码构建 | Go 1.25+、Node.js 24、PowerShell 7 |
 
 WebView2 是 Windows 上显示界面的运行库。缺少时，从 [Microsoft 官方页面](https://developer.microsoft.com/microsoft-edge/webview2/)安装 Evergreen Runtime。
@@ -43,11 +43,13 @@ WebView2 是 Windows 上显示界面的运行库。缺少时，从 [Microsoft �
 
 ### Claude 多账号
 
-打开设置的「Claude 账号」，点击「保存当前登录」保存现有 Claude Code 登录。已登录 Claude Desktop 的用户，可以保存其 Code 功能的登录；先在 Desktop 的 Code 页面打开一次会话，即可准备好对应凭据。
+打开设置的「Claude 账号」，点击「保存当前登录」保存现有登录。已安装 Desktop 时，CCBar 保存 Chat/Cowork 的网页登录和 Code 凭据，保存期间 Desktop 会短暂关闭并重新打开。首次启用 Code 时，按 Desktop 页面的提示完成连接。
 
-点击「添加账号」，为新账号完成 Claude Code 的官方浏览器授权。点击已保存账号的「切换」设为新终端的默认账号，或点击「启动」直接用该账号打开 Claude Code。启动时使用本机终端实际解析到的 `claude` 命令，支持 PowerShell 函数、别名和脚本入口。
+点击「添加账号」直接开始登录，账号名称从邮箱自动生成，随后可重命名。已安装 Desktop 时，在原生 Desktop 完成登录，CCBar 自动连接 Code 并保存完整会话；仅使用 CLI 时，通过系统浏览器授权与本机回调自动完成。登录进度显示在账号页面，取消后恢复此前的 Desktop 登录。
 
-账号的登录信息各自保存，项目会话、历史索引、任务和计划共享。CLI 偏好与 MCP 设置同步使用。已经运行的终端继续使用启动时选择的账号。
+点击「切换」同时更新 CLI 默认账号及 Desktop 的 Chat、Cowork 和 Code 登录，Desktop 会重新打开。账号在完整登录保存后进入可切换列表。「启动」使用本机终端实际解析到的 `claude` 命令，支持 PowerShell 函数、别名和脚本入口。
+
+账号的登录信息各自保存，CLI 项目会话、历史索引、任务和计划共享，偏好与 MCP 设置同步使用。切换时同步 Desktop Code 的本地会话列表与最新会话信息，记录与全局偏好保留在原位置；Chat/Cowork 的云端记录按所选账号展示。已经运行的 CLI 终端继续使用启动时选择的账号。
 
 Claude CLI 安装步骤见 [官方安装页面](https://code.claude.com/docs/en/setup)。在终端运行 `claude --version` 可确认安装成功。在相同工作目录执行 `claude --resume` 可以继续共享的项目会话。
 
@@ -150,17 +152,23 @@ cc-bar/
 │   ├── accounts/                 多账号与共享会话
 │   │   ├── store.go              账号存储、登录状态与额度刷新
 │   │   ├── types.go              Claude 与 Codex 账号类型
-│   │   ├── cli.go                Claude 登录、切换与终端启动
+│   │   ├── cli.go                Claude 账号切换与终端启动
+│   │   ├── oauth.go              浏览器回调、原生登录与进度
 │   │   ├── desktop.go            Claude Desktop Code 登录导入
+│   │   ├── desktop_history.go    Desktop Code 本地会话同步
+│   │   ├── desktop_switch.go     Desktop 完整登录保存与切换
+│   │   ├── desktop_session_windows.go 原生安装发现与会话文件
 │   │   ├── platform_windows.go   PowerShell 入口、环境变量与目录联接
 │   │   ├── history.go            共享会话、任务、历史与 MCP 设置
 │   │   ├── codex.go              Codex 账号导入、排序与展示
 │   │   ├── credits.go            Codex 重置次数管理
-│   │   └── accounts_test.go      账号隔离与历史共享检查
+│   │   ├── accounts_test.go      账号隔离与历史共享检查
+│   │   └── oauth_test.go         自动授权、取消与 Desktop 会话检查
 │   ├── providers/                凭据发现与服务接口
 │   │   ├── credentials.go        本机登录凭据读取
 │   │   ├── client.go             额度请求与服务状态查询
 │   │   ├── refresh.go            OAuth 凭据刷新
+│   │   ├── claude_oauth.go        Claude OAuth 兑换与身份读取
 │   │   ├── antigravity.go        Antigravity 本地连接与额度
 │   │   ├── credits.go            Codex 限额重置接口
 │   │   ├── parsers.go            服务响应解析

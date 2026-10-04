@@ -5,36 +5,20 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
-	"strings"
 
 	"github.com/Mag1cFall/cc-bar/internal/model"
 	"github.com/Mag1cFall/cc-bar/internal/providers"
-	"github.com/google/uuid"
 )
 
-// saveDesktopClaude 将桌面已有 Code 登录保存为独立 CLI 账号
-func (store *Store) saveDesktopClaude(credential *model.Credential) (ClaudeProfile, int, error) {
-	if credential.Source != "Claude Desktop Code" || !slices.Contains(credential.Scopes, "user:inference") {
-		return ClaudeProfile{}, -1, errors.New("请在 Claude Desktop 的 Code 页面打开一次会话，再保存登录")
+// hasCompleteCodeLogin 检查可刷新且具备 Code 与账号查询权限的登录
+func hasCompleteCodeLogin(credential *model.Credential) bool {
+	if credential == nil || credential.AccessToken == "" || credential.RefreshToken == "" {
+		return false
 	}
-	profile := ClaudeProfile{ID: strings.ReplaceAll(uuid.NewString(), "-", ""), DesktopLinked: true, AccountUUID: credential.AccountUUID, OrganizationUUID: credential.OrganizationUUID}
-	profile.ConfigDirectory = filepath.Join(store.dataDir, "claude-accounts", profile.ID)
-	index := -1
-	for existingIndex, existing := range store.claude {
-		if existing.DesktopLinked && existing.AccountUUID == credential.AccountUUID && existing.OrganizationUUID == credential.OrganizationUUID && store.isManaged(existing) {
-			profile, index = existing, existingIndex
-			break
-		}
-	}
-	if err := prepareHistory(profile.ConfigDirectory, filepath.Join(store.home, ".claude")); err != nil {
-		return ClaudeProfile{}, -1, err
-	}
-	if err := store.writeDesktopClaude(profile, credential); err != nil {
-		return ClaudeProfile{}, -1, err
-	}
-	return profile, index, nil
+	return slices.Contains(credential.Scopes, "user:inference") && slices.Contains(credential.Scopes, "user:profile")
 }
 
+// writeDesktopClaude 写入独立账号的 Code 凭据与身份
 func (store *Store) writeDesktopClaude(profile ClaudeProfile, credential *model.Credential) error {
 	if !store.isManaged(profile) {
 		return errors.New("账号目录位置有误")

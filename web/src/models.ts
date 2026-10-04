@@ -62,11 +62,21 @@ export interface ClaudeAccount {
   email?: string
   plan?: string
   isActive: boolean
+  desktopSaved?: boolean
+  desktopActive: boolean
   historyShared: boolean
   needsLogin: boolean
   isLoggingIn: boolean
   error?: string
   snapshot?: QuotaSnapshot
+}
+export interface ClaudeLogin {
+  id: string
+  accountId?: string
+  stage: string
+  url?: string
+  error?: string
+  mode: string
 }
 export interface CodexAccount {
   id: string
@@ -84,6 +94,7 @@ export interface Snapshot {
   settings: Settings
   providers: Provider[]
   claudeAccounts: ClaudeAccount[]
+  claudeLogin?: ClaudeLogin
   importedCodexAccounts: CodexAccount[]
   serviceStatuses: Record<string, string>
   scan: {

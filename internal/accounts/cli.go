@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/Mag1cFall/cc-bar/internal/providers"
 )
@@ -86,54 +87,6 @@ func (store *Store) cliProfile(id string) (ClaudeProfile, error) {
 	return profile, nil
 }
 
-// LoginClaude 用现有 Claude 命令启动浏览器授权并等待登录完成
-func (store *Store) LoginClaude(ctx context.Context, id string) error {
-	profile, err := store.cliProfile(id)
-	if err != nil {
-		return err
-	}
-	executable, err := FindClaude(store.home)
-	if err != nil {
-		return err
-	}
-	store.mu.Lock()
-	index := store.claudeIndex(id)
-	if index < 0 {
-		store.mu.Unlock()
-		return errors.New("account not found")
-	}
-	if store.claude[index].IsLoggingIn {
-		store.mu.Unlock()
-		return errors.New("登录正在进行")
-	}
-	store.claude[index].IsLoggingIn = true
-	store.mu.Unlock()
-	store.notify()
-	command := claudeCommand(ctx, executable, "auth", "login", "--claudeai")
-	command.Dir = store.home
-	command.Env = cliEnvironment(profile)
-	showConsole(command)
-	runError := command.Run()
-	store.mu.Lock()
-	index = store.claudeIndex(id)
-	if index >= 0 {
-		store.claude[index].IsLoggingIn = false
-		store.reloadClaudeLocked(&store.claude[index])
-		if runError == nil && store.claude[index].NeedsLogin {
-			runError = errors.New("登录尚未完成，请重试")
-		}
-		if runError != nil {
-			store.claude[index].Error = runError.Error()
-		}
-		if err := store.saveClaudeLocked(); runError == nil {
-			runError = err
-		}
-	}
-	store.mu.Unlock()
-	store.notify()
-	return runError
-}
-
 // StartClaude 用现有 Claude 命令和所选账号启动独立终端
 func (store *Store) StartClaude(id, workingDir string) error {
 	profile, err := store.cliProfile(id)
@@ -165,8 +118,20 @@ func (store *Store) StartClaude(id, workingDir string) error {
 	return nil
 }
 
-// SwitchClaude 将官方登录目录设为新终端的默认账号
-func (store *Store) SwitchClaude(id string) error {
+// SwitchClaude 同步切换 CLI 默认账号与 Desktop 完整会话
+func (store *Store) SwitchClaude(id string) (result error) {
+	attempt, err := store.beginLogin(id, "switch", 45*time.Second)
+	if err != nil {
+		return err
+	}
+	defer attempt.cancel()
+	previousDirectory := os.Getenv("CLAUDE_CONFIG_DIR")
+	defer func() {
+		if result != nil && os.Getenv("CLAUDE_CONFIG_DIR") != previousDirectory {
+			result = errors.Join(result, store.setClaudeDirectory(previousDirectory))
+		}
+		store.finishLogin(attempt, result)
+	}()
 	profile, err := store.cliProfile(id)
 	if err != nil {
 		return err
@@ -178,11 +143,21 @@ func (store *Store) SwitchClaude(id string) error {
 	if credential == nil {
 		return errors.New("请先登录此账号")
 	}
+	if err := store.switchDesktop(attempt, profile); err != nil {
+		return err
+	}
+	if err := attempt.ctx.Err(); err != nil {
+		return err
+	}
+	profile, err = store.cliProfile(id)
+	if err != nil {
+		return err
+	}
 	directory := profile.ConfigDirectory
 	if profile.UsesDefaultConfig {
 		directory = ""
 	}
-	if err := setUserClaudeDirectory(directory); err != nil {
+	if err := store.setClaudeDirectory(directory); err != nil {
 		return err
 	}
 	store.mu.Lock()
@@ -193,4 +168,19 @@ func (store *Store) SwitchClaude(id string) error {
 	store.mu.Unlock()
 	store.notify()
 	return err
+}
+
+// setClaudeDirectory 更新当前用户的默认账号或独立运行目录
+func (store *Store) setClaudeDirectory(directory string) error {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return err
+	}
+	if sameDirectory(home, store.home) {
+		return setUserClaudeDirectory(directory)
+	}
+	if directory == "" {
+		return os.Unsetenv("CLAUDE_CONFIG_DIR")
+	}
+	return os.Setenv("CLAUDE_CONFIG_DIR", directory)
 }

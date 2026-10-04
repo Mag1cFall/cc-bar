@@ -41,6 +41,7 @@ func (service *Service) ExportDiagnostics() (string, error) {
 		snapshot.Providers[index].Account = nil
 	}
 	snapshot.ClaudeAccounts = nil
+	snapshot.ClaudeLogin = nil
 	snapshot.ImportedCodexAccounts = nil
 	data, err := json.MarshalIndent(snapshot, "", "  ")
 	if err == nil {

@@ -69,11 +69,34 @@ export default function Statistics({ page, service }: { page: string; service: n
   const datesVisible = page !== 'timeline' && page !== 'cycles'
   return (
     <div className={`statistics-content statistics-${page}`}>
-      <header className="page-heading">
+      <header className="page-heading statistics-heading">
         <div>
           <h1>{title}</h1>
           {service !== null && page !== 'overview' && <p>{usageNames[service]}</p>}
         </div>
+        {datesVisible && (
+          <div className="date-toolbar">
+            <Segments
+              value={grain}
+              onChange={chooseGrain}
+              label={tr('Chart grain', '图表粒度')}
+              options={[
+                { value: 'day', label: tr('Day', '日') },
+                { value: 'week', label: tr('Week', '周') },
+                { value: 'month', label: tr('Month', '月') },
+              ]}
+            />
+            <Segments
+              value={range}
+              onChange={setRange}
+              label={tr('Date range', '日期范围')}
+              options={ranges.map(([value, english, chinese]) => ({
+                value: value ?? '',
+                label: tr(english ?? '', chinese ?? ''),
+              }))}
+            />
+          </div>
+        )}
         <div className="actions">
           <QueryState pending={snapshot.scan.isScanning} error={snapshot.scan.error} />
           <Button
@@ -88,31 +111,6 @@ export default function Statistics({ page, service }: { page: string; service: n
           </Button>
         </div>
       </header>
-      {datesVisible && (
-        <div className="date-toolbar">
-          <Segments
-            value={grain}
-            onChange={chooseGrain}
-            label={tr('Chart grain', '图表粒度')}
-            options={[
-              { value: 'day', label: tr('Day', '日') },
-              { value: 'week', label: tr('Week', '周') },
-              { value: 'month', label: tr('Month', '月') },
-            ]}
-          />
-          <Segments
-            value={range}
-            onChange={setRange}
-            label={tr('Date range', '日期范围')}
-            options={[
-              ...ranges.map(([value, english, chinese]) => ({
-                value: value ?? '',
-                label: tr(english ?? '', chinese ?? ''),
-              })),
-            ]}
-          />
-        </div>
-      )}
       {datesVisible && range === 'custom' && (
         <div className="custom-dates">
           <label>

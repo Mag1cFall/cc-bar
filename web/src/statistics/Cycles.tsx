@@ -1,4 +1,6 @@
 import { api } from '../bridge'
+import * as Collapsible from '@radix-ui/react-collapsible'
+import { ChevronDown } from 'lucide-react'
 import { Card, Empty, Logo, QueryState, Section } from '../components'
 import { useApp } from '../context'
 import {
@@ -165,20 +167,27 @@ function CycleCard({ record, app, kind }: { record?: Cycle; app: number; kind: n
               ? dateTime(resetsAt, english)
               : `${tr('Resets in ', '重置剩余 ')}${relativeTime(resetsAt, english)}`}
           </p>
-          <details className="cycle-details">
-            <summary>{tr('Usage details', '用量详情')}</summary>
-            <TokenBreakdown totals={record.localTotals} />
-            <p className="cycle-remaining">
-              {tr('Estimated remaining', '预计剩余费用')} ·{' '}
-              {record.remainingLocalCost === undefined ? '—' : money(record.remainingLocalCost)}
-            </p>
-            {record.extraResetCount > 0 && (
-              <p>
-                {record.extraResetCount} {tr('extra resets', '次额外重置')} ·{' '}
-                {record.allowanceSegments?.length ?? 0} {tr('allowance segments', '个额度分段')}
-              </p>
-            )}
-          </details>
+          <Collapsible.Root className="cycle-details">
+            <Collapsible.Trigger className="cycle-details-trigger">
+              {tr('Usage details', '用量详情')}
+              <ChevronDown size={15} className="disclosure-chevron" />
+            </Collapsible.Trigger>
+            <Collapsible.Content className="disclosure-content">
+              <div className="cycle-details-body">
+                <TokenBreakdown totals={record.localTotals} />
+                <p className="cycle-remaining">
+                  {tr('Estimated remaining', '预计剩余费用')} ·{' '}
+                  {record.remainingLocalCost === undefined ? '—' : money(record.remainingLocalCost)}
+                </p>
+                {record.extraResetCount > 0 && (
+                  <p>
+                    {record.extraResetCount} {tr('extra resets', '次额外重置')} ·{' '}
+                    {record.allowanceSegments?.length ?? 0} {tr('allowance segments', '个额度分段')}
+                  </p>
+                )}
+              </div>
+            </Collapsible.Content>
+          </Collapsible.Root>
         </>
       ) : (
         <div className="cycle-empty">

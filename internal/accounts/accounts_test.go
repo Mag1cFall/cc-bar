@@ -284,8 +284,12 @@ func TestSharedPreferencesAndTasks(t *testing.T) {
 	}
 	expires := time.Now().Add(time.Hour)
 	desktop := &model.Credential{AccessToken: "desktop-access", RefreshToken: "desktop-refresh", Scopes: []string{"user:inference", "user:profile"}, AccountUUID: "desktop-account", OrganizationUUID: "desktop-organization", Email: "desktop@example.test", SubscriptionType: "max", ExpiresAt: &expires, Source: "Claude Desktop Code"}
-	profile, index, err := store.saveDesktopClaude(desktop)
-	if err != nil || index != -1 {
+	profile := ClaudeProfile{ID: "228c9016-0cd2-42b4-b1d1-5545477a985d", DesktopLinked: true}
+	profile.ConfigDirectory = filepath.Join(store.dataDir, "claude-accounts", profile.ID)
+	if err := prepareHistory(profile.ConfigDirectory, shared); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.writeDesktopClaude(profile, desktop); err != nil {
 		t.Fatalf("保存桌面 Code 登录: %v", err)
 	}
 	credential, err := store.readClaude(profile)

@@ -1,6 +1,6 @@
 import { Call, type CancellablePromise } from '@wailsio/runtime'
 import type {
-  ClaudeAccount,
+  ClaudeLogin,
   CodexAccount,
   CodexPreview,
   ConversationDetail,
@@ -37,8 +37,9 @@ export const api = {
   timeline: (query: { app: number | null; accountKey?: string; limitKind: number }) =>
     invoke<Timeline>('GetTimeline', query),
   saveClaude: () => invoke<void>('SaveClaudeAccount'),
-  addClaude: (name: string) => invoke<ClaudeAccount>('AddClaudeAccount', name),
-  loginClaude: (id: string) => invoke<void>('LoginClaudeAccount', id),
+  loginClaude: (id = '') => invoke<ClaudeLogin>('BeginClaudeLogin', id),
+  cancelClaudeLogin: () => invoke<void>('CancelClaudeLogin'),
+  openClaudeAuthorization: () => invoke<void>('OpenClaudeAuthorization'),
   switchClaude: (id: string) => invoke<void>('SwitchClaudeAccount', id),
   startClaude: (id: string) => invoke<void>('StartClaudeAccount', id),
   renameClaude: (id: string, name: string) => invoke<void>('RenameClaudeAccount', id, name),

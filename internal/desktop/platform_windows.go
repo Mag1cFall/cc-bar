@@ -142,3 +142,6 @@ func openDirectory(path string) error {
 	}
 	return windows.ShellExecute(0, verb, file, nil, nil, windows.SW_SHOWNORMAL)
 }
+
+// OpenURL 用系统默认浏览器打开官方授权页面
+func (host *Host) OpenURL(address string) error { return openDirectory(address) }

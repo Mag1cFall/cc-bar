@@ -222,7 +222,7 @@ function Details({ id }: { id: string }) {
               <span>{tr('Total tokens', '总 Tokens')}</span>
               <strong className="numeric">{compact(totals.tokens, english)}</strong>
             </div>
-            <TokenBreakdown totals={totals} extended />
+            <TokenBreakdown totals={totals} variant="full" />
           </Card>
           <Section title={tr('Cost breakdown', '费用拆分')}>
             <Card className="padded">
@@ -253,7 +253,7 @@ function Details({ id }: { id: string }) {
                     <span className="badge">{model.speed || 'standard'}</span>
                     <strong>{money(model.totals.cost)}</strong>
                   </div>
-                  <TokenBreakdown totals={model.totals} extended />
+                  <TokenBreakdown totals={model.totals} variant="full" />
                 </div>
               ))}
             </Card>

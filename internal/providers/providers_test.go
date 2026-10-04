@@ -50,7 +50,7 @@ func TestCredentialFormats(t *testing.T) {
 	if err := WriteJSON(filepath.Join(directory, "config.json"), object{"lastKnownAccountUuid": "account", "oauth:tokenCacheV2": base64.StdEncoding.EncodeToString(encrypted)}); err != nil {
 		t.Fatal(err)
 	}
-	desktop, err := readDesktopDirectory(directory, cli)
+	desktop, err := ReadClaudeDesktopDirectory(directory, cli)
 	if err != nil || desktop == nil || desktop.AccessToken != "fixture-desktop-access" || desktop.RefreshToken != "fixture-desktop-refresh" || desktop.AccountUUID != "account" || desktop.Source != "Claude Desktop Code" || len(desktop.Scopes) != 4 || desktop.Scopes[0] != "user:inference" || desktop.RateLimitTier != "default_claude_max_20x" {
 		t.Fatalf("desktop credential failed: %v", err)
 	}

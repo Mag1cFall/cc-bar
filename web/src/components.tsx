@@ -3,7 +3,7 @@ import * as DialogPrimitive from '@radix-ui/react-dialog'
 import * as DropdownPrimitive from '@radix-ui/react-dropdown-menu'
 import * as SelectPrimitive from '@radix-ui/react-select'
 import * as SwitchPrimitive from '@radix-ui/react-switch'
-import { Check, ChevronDown, MoreHorizontal, X, LoaderCircle, AlertTriangle } from 'lucide-react'
+import { Check, ChevronDown, ChevronUp, MoreHorizontal, X, LoaderCircle, AlertTriangle } from 'lucide-react'
 import { useApp } from './context'
 import { dateTime, quotaTone, relativeTime, remaining } from './format'
 import type { QuotaLimit } from './models'
@@ -50,6 +50,7 @@ export function Select({
   label,
   className = '',
   disabled = false,
+  icon,
 }: {
   value: string
   onChange: (value: string) => void
@@ -57,19 +58,31 @@ export function Select({
   label: string
   className?: string
   disabled?: boolean
+  icon?: ReactNode
 }) {
   return (
     <SelectPrimitive.Root value={value} onValueChange={onChange} disabled={disabled}>
       <SelectPrimitive.Trigger className={`select ${className}`} aria-label={label}>
-        <SelectPrimitive.Value />
-        <SelectPrimitive.Icon>
-          <ChevronDown size={13} />
+        <span className="select-value">
+          {icon}
+          <SelectPrimitive.Value />
+        </span>
+        <SelectPrimitive.Icon className="select-chevron">
+          <ChevronDown size={15} />
         </SelectPrimitive.Icon>
       </SelectPrimitive.Trigger>
       <SelectPrimitive.Portal>
-        <SelectPrimitive.Content className="select-menu" position="popper" sideOffset={5}>
-          <SelectPrimitive.ScrollUpButton className="select-scroll">⌃</SelectPrimitive.ScrollUpButton>
-          <SelectPrimitive.Viewport>
+        <SelectPrimitive.Content
+          className="select-menu"
+          position="popper"
+          align="end"
+          sideOffset={6}
+          collisionPadding={10}
+        >
+          <SelectPrimitive.ScrollUpButton className="select-scroll">
+            <ChevronUp size={15} />
+          </SelectPrimitive.ScrollUpButton>
+          <SelectPrimitive.Viewport className="select-viewport">
             {options.map((option) => (
               <SelectPrimitive.Item key={option.value} value={option.value} className="select-option">
                 <SelectPrimitive.ItemIndicator className="select-check">
@@ -79,7 +92,9 @@ export function Select({
               </SelectPrimitive.Item>
             ))}
           </SelectPrimitive.Viewport>
-          <SelectPrimitive.ScrollDownButton className="select-scroll">⌄</SelectPrimitive.ScrollDownButton>
+          <SelectPrimitive.ScrollDownButton className="select-scroll">
+            <ChevronDown size={15} />
+          </SelectPrimitive.ScrollDownButton>
         </SelectPrimitive.Content>
       </SelectPrimitive.Portal>
     </SelectPrimitive.Root>
