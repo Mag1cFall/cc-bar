@@ -10,25 +10,77 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"sort"
+	"strings"
+	"sync"
 
 	"github.com/Mag1cFall/cc-bar/internal/providers"
 )
 
-var sharedDirectories = []string{"projects", "tasks", "plans", "todos", "session-env"}
+// sharedDirectories 是始终在共享目录建立的记录目录
+var sharedDirectories = []string{"projects", "tasks", "plans", "todos", "session-env", "file-history"}
 
-// historyLinked 检查账号目录是否引用同一份会话与历史
-func historyLinked(directory, shared string) bool {
+// sharedFiles 是始终在共享目录建立的文件及其初始内容
+var sharedFiles = map[string][]byte{"history.jsonl": {}, "settings.json": []byte("{}\n")}
+
+// accountEntries 是只属于单个账号配置目录的条目
+var accountEntries = map[string]bool{".credentials.json": true, ".claude.json": true, ".claude.json.backup": true, "backups": true, ".ccbar-imports": true, profileBaseName: true}
+
+// profileBaseName 是账号目录中记录上次同步结果的文件名
+const profileBaseName = ".ccbar-profile-base.json"
+
+// sharedProfileKeys 是在默认与账号 .claude.json 之间同步的全局偏好与项目状态
+var sharedProfileKeys = []string{"projects", "mcpServers", "hasCompletedOnboarding", "lastOnboardingVersion", "lastReleaseNotesSeen", "theme", "editorMode", "verbose", "autoCompactEnabled", "preferredNotifChannel", "githubRepoPaths"}
+
+// historyMutex 串行化共享记录的合并与链接
+var historyMutex sync.Mutex
+
+// sharedEntries 返回两侧除账号私有条目外的全部条目及其是否为目录
+func sharedEntries(directory, shared string) (map[string]bool, error) {
+	entries := map[string]bool{}
 	for _, name := range sharedDirectories {
-		current, err := resolveDirectory(filepath.Join(directory, name))
-		if err != nil {
-			return false
+		entries[name] = true
+	}
+	for name := range sharedFiles {
+		entries[name] = false
+	}
+	for _, root := range []string{shared, directory} {
+		items, err := os.ReadDir(root)
+		if os.IsNotExist(err) {
+			continue
 		}
-		target, err := resolveDirectory(filepath.Join(shared, name))
-		if err != nil || !sameDirectory(current, target) {
-			return false
+		if err != nil {
+			return nil, err
+		}
+		for _, item := range items {
+			name := item.Name()
+			if _, known := entries[name]; known || accountEntries[name] || strings.Contains(name, ".tmp") || strings.HasSuffix(name, ".lock") {
+				continue
+			}
+			entries[name] = item.IsDir() || item.Type()&(os.ModeSymlink|os.ModeIrregular) != 0
 		}
 	}
-	for _, name := range []string{"history.jsonl", "settings.json"} {
+	return entries, nil
+}
+
+// historyLinked 检查账号目录是否引用同一份会话、历史与配置
+func historyLinked(directory, shared string) bool {
+	entries, err := sharedEntries(directory, shared)
+	if err != nil {
+		return false
+	}
+	for name, isDirectory := range entries {
+		if isDirectory {
+			current, err := resolveDirectory(filepath.Join(directory, name))
+			if err != nil {
+				return false
+			}
+			target, err := resolveDirectory(filepath.Join(shared, name))
+			if err != nil || !sameDirectory(current, target) {
+				return false
+			}
+			continue
+		}
 		first, err := os.Stat(filepath.Join(directory, name))
 		if err != nil {
 			return false
@@ -103,26 +155,38 @@ func copyHistoryFile(target, source string) error {
 	return providers.WriteBytes(target, data)
 }
 
-// prepareHistory 合并已有会话后建立共享目录与历史索引
+// prepareHistory 将账号私有条目以外的记录与配置合并到共享目录并建立链接
 func prepareHistory(directory, shared string) error {
+	historyMutex.Lock()
+	defer historyMutex.Unlock()
 	if sameDirectory(directory, shared) {
 		return nil
 	}
 	if err := os.MkdirAll(directory, 0700); err != nil {
 		return err
 	}
-	for _, name := range sharedDirectories {
-		if err := shareDirectory(directory, shared, name); err != nil {
+	entries, err := sharedEntries(directory, shared)
+	if err != nil {
+		return err
+	}
+	_, baseErr := os.Stat(filepath.Join(directory, profileBaseName))
+	adopted := baseErr == nil
+	names := make([]string, 0, len(entries))
+	for name := range entries {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		if entries[name] {
+			err = shareDirectory(directory, shared, name)
+		} else {
+			err = shareFile(directory, shared, name, sharedFiles[name], adopted)
+		}
+		if err != nil {
 			return err
 		}
 	}
-	if err := shareFile(directory, shared, "history.jsonl", nil); err != nil {
-		return err
-	}
-	if err := shareFile(directory, shared, "settings.json", []byte("{}\n")); err != nil {
-		return err
-	}
-	return shareMCPPreferences(directory, shared)
+	return shareProfilePreferences(directory, shared)
 }
 
 // shareDirectory 合并账号记录并建立普通用户可用的目录联接
@@ -165,17 +229,23 @@ func shareDirectory(directory, shared, name string) error {
 	return nil
 }
 
-// shareFile 合并历史或设置并保留同一份文件的硬链接
-func shareFile(directory, shared, name string, initial []byte) error {
+// shareFile 首次接入时合并历史或设置，之后以最后修改的一份为准，并保留同一份文件的硬链接
+func shareFile(directory, shared, name string, initial []byte, adopted bool) error {
 	target := filepath.Join(shared, name)
+	local := filepath.Join(directory, name)
 	if _, err := os.Stat(target); os.IsNotExist(err) {
-		if err := providers.WriteBytes(target, initial); err != nil {
+		if _, err := os.Lstat(local); err == nil {
+			if err := os.Rename(local, target); err != nil {
+				return err
+			}
+		} else if initial == nil {
+			return nil
+		} else if err := providers.WriteBytes(target, initial); err != nil {
 			return err
 		}
 	} else if err != nil {
 		return err
 	}
-	local := filepath.Join(directory, name)
 	if first, err := os.Stat(local); err == nil {
 		second, err := os.Stat(target)
 		if err != nil {
@@ -188,10 +258,12 @@ func shareFile(directory, shared, name string, initial []byte) error {
 			if err := mergeLines(target, local); err != nil {
 				return err
 			}
-		} else {
+		} else if !adopted {
 			if err := mergeJSONFile(target, local, shared, filepath.Base(directory), name); err != nil {
 				return err
 			}
+		} else if err := keepNewerFile(target, local, shared, filepath.Base(directory), name, first, second); err != nil {
+			return err
 		}
 		if err := os.Remove(local); err != nil {
 			return err
@@ -203,6 +275,28 @@ func shareFile(directory, shared, name string, initial []byte) error {
 		return fmt.Errorf("share %s: %w", name, err)
 	}
 	return nil
+}
+
+// keepNewerFile 以最后修改的一份作为共享内容并保留另一份原文
+func keepNewerFile(target, local, shared, accountName, name string, localInfo, targetInfo os.FileInfo) error {
+	current, err := os.ReadFile(target)
+	if err != nil {
+		return err
+	}
+	incoming, err := os.ReadFile(local)
+	if err != nil {
+		return err
+	}
+	if bytes.Equal(current, incoming) {
+		return nil
+	}
+	if localInfo.ModTime().After(targetInfo.ModTime()) {
+		if err := preserveImportedFile(shared, "shared", name, current); err != nil {
+			return err
+		}
+		return writeLinkedFile(target, incoming)
+	}
+	return preserveImportedFile(shared, accountName, name, incoming)
 }
 
 // mergeRecordDirectory 将独立记录迁入共享目录并完整保留冲突文件
@@ -383,61 +477,160 @@ func writeLinkedFile(path string, data []byte) error {
 	return errors.Join(writeError, closeError)
 }
 
-// shareMCPPreferences 仅同步 MCP 定义并保持各账号 OAuth 身份独立
-func shareMCPPreferences(directory, shared string) error {
+// cloneJSON 深拷贝 JSON 值
+func cloneJSON(value any) any {
+	data, err := json.Marshal(value)
+	if err != nil {
+		return value
+	}
+	var copied any
+	if json.Unmarshal(data, &copied) != nil {
+		return value
+	}
+	return copied
+}
+
+// lockProfile 按 Claude Code 的目录锁约定锁定 .claude.json，已被占用时返回 false
+func lockProfile(path string) (func(), bool, error) {
+	lock := path + ".lock"
+	if err := os.Mkdir(lock, 0700); err != nil {
+		if os.IsExist(err) {
+			return nil, false, nil
+		}
+		return nil, false, err
+	}
+	return func() { os.Remove(lock) }, true, nil
+}
+
+// shareProfilePreferences 按上次同步结果三方合并全局偏好、项目状态与 MCP 定义并保持各账号 OAuth 身份独立
+func shareProfilePreferences(directory, shared string) error {
 	defaultPath := filepath.Join(filepath.Dir(shared), ".claude.json")
 	profilePath := filepath.Join(directory, ".claude.json")
-	read := func(path string) (map[string]any, error) {
+	for _, path := range []string{defaultPath, profilePath} {
+		unlock, locked, err := lockProfile(path)
+		if err != nil {
+			return err
+		}
+		if !locked {
+			return nil
+		}
+		defer unlock()
+	}
+	read := func(path string) (map[string]any, os.FileInfo, error) {
 		data, err := os.ReadFile(path)
 		if os.IsNotExist(err) {
-			return map[string]any{}, nil
+			return map[string]any{}, nil, nil
 		}
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		value, err := providers.DecodeObject(data)
 		if err == nil && value == nil {
 			err = errors.New("Claude profile must be a JSON object")
 		}
-		return value, err
+		if err != nil {
+			return nil, nil, err
+		}
+		info, err := os.Stat(path)
+		return value, info, err
 	}
-	current, err := read(defaultPath)
+	current, currentInfo, err := read(defaultPath)
 	if err != nil {
 		return err
 	}
-	incoming, err := read(profilePath)
+	incoming, incomingInfo, err := read(profilePath)
 	if err != nil {
 		return err
 	}
-	servers, currentServers := current["mcpServers"].(map[string]any)
-	profileServers, incomingServers := incoming["mcpServers"].(map[string]any)
-	if !currentServers && !incomingServers {
+	basePath := filepath.Join(directory, profileBaseName)
+	base, baseInfo, err := read(basePath)
+	if err != nil {
+		return err
+	}
+	if currentInfo == nil || incomingInfo == nil {
+		base = map[string]any{}
+	}
+	preferIncoming := incomingInfo != nil && (currentInfo == nil || incomingInfo.ModTime().After(currentInfo.ModTime()))
+	same := func(first any, hasFirst bool, second any, hasSecond bool) bool {
+		return hasFirst == hasSecond && reflect.DeepEqual(first, second)
+	}
+	merged := map[string]any{}
+	currentChanged, incomingChanged := false, false
+	for _, key := range sharedProfileKeys {
+		left, hasLeft := current[key]
+		right, hasRight := incoming[key]
+		previous, hasPrevious := base[key]
+		value, hasValue := left, hasLeft
+		switch {
+		case same(left, hasLeft, right, hasRight):
+		case same(previous, hasPrevious, left, hasLeft):
+			value, hasValue = right, hasRight
+		case same(previous, hasPrevious, right, hasRight):
+		case !hasLeft:
+			value, hasValue = right, hasRight
+		case !hasRight:
+		case baseInfo == nil:
+			if key == "mcpServers" {
+				if err := preserveMCPServers(shared, directory, left, right); err != nil {
+					return err
+				}
+			}
+			value = mergeJSONValue(cloneJSON(left), right, key != "mcpServers" && preferIncoming)
+		case key == "projects" || key == "githubRepoPaths":
+			value = mergeJSONValue(cloneJSON(left), right, preferIncoming)
+		default:
+			if key == "mcpServers" {
+				if err := preserveMCPServers(shared, directory, left, right); err != nil {
+					return err
+				}
+			}
+			if preferIncoming {
+				value = right
+			}
+		}
+		if !hasValue {
+			delete(current, key)
+			delete(incoming, key)
+			currentChanged = currentChanged || hasLeft
+			incomingChanged = incomingChanged || hasRight
+			continue
+		}
+		merged[key] = value
+		if !same(left, hasLeft, value, true) {
+			current[key], currentChanged = value, true
+		}
+		if !same(right, hasRight, value, true) {
+			incoming[key], incomingChanged = value, true
+		}
+	}
+	if currentChanged {
+		if err := providers.WriteJSON(defaultPath, current); err != nil {
+			return err
+		}
+	}
+	if incomingChanged {
+		if err := providers.WriteJSON(profilePath, incoming); err != nil {
+			return err
+		}
+	}
+	if baseInfo != nil && reflect.DeepEqual(base, merged) {
 		return nil
 	}
-	if servers == nil {
-		servers = map[string]any{}
-	}
-	if currentServers && incomingServers && !reflect.DeepEqual(servers, profileServers) {
-		currentData, err := json.MarshalIndent(servers, "", "  ")
-		if err != nil {
-			return err
-		}
-		profileData, err := json.MarshalIndent(profileServers, "", "  ")
-		if err != nil {
-			return err
-		}
-		if err := preserveImportedFile(shared, "shared", "mcp-servers.json", currentData); err != nil {
-			return err
-		}
-		if err := preserveImportedFile(shared, filepath.Base(directory), "mcp-servers.json", profileData); err != nil {
-			return err
-		}
-	}
-	merged := mergeJSONValue(servers, profileServers, false)
-	current["mcpServers"] = merged
-	incoming["mcpServers"] = merged
-	if err := providers.WriteJSON(defaultPath, current); err != nil {
+	return providers.WriteJSON(basePath, merged)
+}
+
+// preserveMCPServers 保留两侧不同的 MCP 定义原文
+func preserveMCPServers(shared, directory string, current, incoming any) error {
+	currentData, err := json.MarshalIndent(current, "", "  ")
+	if err != nil {
 		return err
 	}
-	return providers.WriteJSON(profilePath, incoming)
+	incomingData, err := json.MarshalIndent(incoming, "", "  ")
+	if err != nil {
+		return err
+	}
+	if err := preserveImportedFile(shared, "shared", "mcp-servers.json", currentData); err != nil {
+		return err
+	}
+	return preserveImportedFile(shared, filepath.Base(directory), "mcp-servers.json", incomingData)
 }

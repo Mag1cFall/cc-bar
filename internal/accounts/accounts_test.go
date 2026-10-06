@@ -3,6 +3,7 @@
 package accounts
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
@@ -15,6 +16,7 @@ import (
 	"github.com/Mag1cFall/cc-bar/internal/model"
 	"github.com/Mag1cFall/cc-bar/internal/providers"
 	"github.com/Mag1cFall/cc-bar/internal/secrets"
+	"github.com/google/uuid"
 )
 
 // TestSharedHistory 验证切换账号后项目与历史持续写入同一文件
@@ -98,7 +100,11 @@ exit 0
 		}
 		resultPath := filepath.Join(home, name+"-result.json")
 		command := claudeCommand(context.Background(), ClaudeCLI{Executable: entry}, "auth", "status", "argument with spaces", "apostrophe's value")
-		command.Env = append(cliEnvironment(profile), "CCBAR_CLI_RESULT="+resultPath)
+		environment, err := cliEnvironment(profile)
+		if err != nil {
+			t.Fatal(err)
+		}
+		command.Env = append(environment, "CCBAR_CLI_RESULT="+resultPath)
 		showConsole(command)
 		if err := command.Run(); err != nil {
 			t.Fatal(err)
@@ -117,7 +123,7 @@ exit 0
 		if err = json.Unmarshal(data, &result); err != nil {
 			t.Fatal(err)
 		}
-		if result.Credential != name+"-token" || result.Directory != profile.ConfigDirectory || result.APIOverride != "" || result.LocalPreference != "preserved" {
+		if result.Credential != name+"-token" || result.Directory != profile.ConfigDirectory || result.APIOverride != "" || result.LocalPreference != "" {
 			t.Fatalf("账号或 local 环境路由错误: %+v", result)
 		}
 		if len(result.Arguments) != 4 || result.Arguments[2] != "argument with spaces" || result.Arguments[3] != "apostrophe's value" {
@@ -295,5 +301,286 @@ func TestSharedPreferencesAndTasks(t *testing.T) {
 	credential, err := store.readClaude(profile)
 	if err != nil || credential == nil || credential.AccessToken != desktop.AccessToken || credential.RefreshToken != desktop.RefreshToken || len(credential.Scopes) != 2 || credential.AccountUUID != desktop.AccountUUID || credential.Email != desktop.Email || !historyLinked(profile.ConfigDirectory, shared) {
 		t.Fatalf("桌面 Code 凭据或共享记录发生改变: %v", err)
+	}
+}
+
+// TestSharedConfigEntries 验证账号私有条目以外的配置全部共享且缺失的共享目录可修复
+func TestSharedConfigEntries(t *testing.T) {
+	home := t.TempDir()
+	shared := filepath.Join(home, ".claude")
+	account := filepath.Join(home, "account")
+	for path, value := range map[string]string{
+		filepath.Join(shared, "CLAUDE.md"):                   "global rules",
+		filepath.Join(shared, "skills", "probe", "SKILL.md"): "skill",
+		filepath.Join(account, ".credentials.json"):          `{"claudeAiOauth":{"accessToken":"account-token"}}`,
+		filepath.Join(account, "agents", "reviewer.md"):      "agent",
+		filepath.Join(account, "notes.txt"):                  "account note",
+	} {
+		if err := providers.WriteBytes(path, []byte(value)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := providers.WriteJSON(filepath.Join(home, ".claude.json"), map[string]any{
+		"oauthAccount":           map[string]string{"emailAddress": "default@example.com"},
+		"hasCompletedOnboarding": true,
+		"projects":               map[string]any{"E:/default": map[string]any{"hasTrustDialogAccepted": true}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := providers.WriteJSON(filepath.Join(account, ".claude.json"), map[string]any{
+		"oauthAccount": map[string]string{"emailAddress": "account@example.com"},
+		"projects":     map[string]any{"E:/account": map[string]any{"allowedTools": []any{"Bash"}}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := prepareHistory(account, shared); err != nil {
+		t.Fatal(err)
+	}
+	if !historyLinked(account, shared) {
+		t.Fatal("account entries are not linked")
+	}
+	for name, want := range map[string]string{"CLAUDE.md": "global rules", filepath.Join("skills", "probe", "SKILL.md"): "skill", filepath.Join("agents", "reviewer.md"): "agent", "notes.txt": "account note"} {
+		for _, root := range []string{account, shared} {
+			data, err := os.ReadFile(filepath.Join(root, name))
+			if err != nil || string(data) != want {
+				t.Fatalf("%s in %s: %q %v", name, root, data, err)
+			}
+		}
+	}
+	if _, err := os.Stat(filepath.Join(shared, ".credentials.json")); !os.IsNotExist(err) {
+		t.Fatal("account credentials leaked into shared directory")
+	}
+	for path, email := range map[string]string{filepath.Join(home, ".claude.json"): "default@example.com", filepath.Join(account, ".claude.json"): "account@example.com"} {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		profile, err := providers.DecodeObject(data)
+		if err != nil {
+			t.Fatal(err)
+		}
+		projects, _ := profile["projects"].(map[string]any)
+		if profile["oauthAccount"].(map[string]any)["emailAddress"] != email || profile["hasCompletedOnboarding"] != true || projects["E:/default"] == nil || projects["E:/account"] == nil {
+			t.Fatalf("profile preferences not synchronized: %s", data)
+		}
+	}
+	if err := os.RemoveAll(filepath.Join(shared, "plans")); err != nil {
+		t.Fatal(err)
+	}
+	if historyLinked(account, shared) {
+		t.Fatal("missing shared directory reported as linked")
+	}
+	if err := prepareHistory(account, shared); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(account, "plans", "plan.md"), []byte("plan"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if data, err := os.ReadFile(filepath.Join(shared, "plans", "plan.md")); err != nil || string(data) != "plan" || !historyLinked(account, shared) {
+		t.Fatalf("restored plans link failed: %v", err)
+	}
+}
+
+// TestReplacedSharedFile 验证被替换而断开的共享文件以最后修改的一份为准
+func TestReplacedSharedFile(t *testing.T) {
+	home := t.TempDir()
+	shared := filepath.Join(home, ".claude")
+	first, second := filepath.Join(home, "first"), filepath.Join(home, "second")
+	if err := providers.WriteBytes(filepath.Join(shared, "CLAUDE.md"), []byte("old rules")); err != nil {
+		t.Fatal(err)
+	}
+	if err := providers.WriteJSON(filepath.Join(shared, "settings.json"), map[string]any{"hooks": map[string]any{"PreToolUse": []any{"guard"}}, "model": "opus"}); err != nil {
+		t.Fatal(err)
+	}
+	for _, directory := range []string{first, second} {
+		if err := prepareHistory(directory, shared); err != nil {
+			t.Fatal(err)
+		}
+	}
+	past := time.Now().Add(-time.Hour)
+	for _, path := range []string{filepath.Join(shared, "CLAUDE.md"), filepath.Join(shared, "settings.json")} {
+		if err := os.Chtimes(path, past, past); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := providers.WriteBytes(filepath.Join(first, "CLAUDE.md"), []byte("new rules")); err != nil {
+		t.Fatal(err)
+	}
+	if err := providers.WriteJSON(filepath.Join(first, "settings.json"), map[string]any{"model": "opus"}); err != nil {
+		t.Fatal(err)
+	}
+	if historyLinked(first, shared) {
+		t.Fatal("replaced files reported as linked")
+	}
+	if err := prepareHistory(first, shared); err != nil {
+		t.Fatal(err)
+	}
+	for _, directory := range []string{shared, first, second} {
+		rules, _ := os.ReadFile(filepath.Join(directory, "CLAUDE.md"))
+		settings, _ := os.ReadFile(filepath.Join(directory, "settings.json"))
+		if string(rules) != "new rules" || bytes.Contains(settings, []byte("hooks")) {
+			t.Fatalf("newer replacement lost in %s: %q %s", directory, rules, settings)
+		}
+	}
+	if !historyLinked(first, shared) || !historyLinked(second, shared) {
+		t.Fatal("replaced files were not relinked")
+	}
+	if data, err := os.ReadFile(filepath.Join(shared, ".ccbar-imports", "shared", "CLAUDE.md")); err != nil || string(data) != "old rules" {
+		t.Fatalf("older content was not preserved: %v", err)
+	}
+}
+
+// TestProfilePreferenceDeletion 验证任一侧的删除与新增按上次同步结果传播
+func TestProfilePreferenceDeletion(t *testing.T) {
+	home := t.TempDir()
+	shared := filepath.Join(home, ".claude")
+	account := filepath.Join(home, "account")
+	defaultPath, accountPath := filepath.Join(home, ".claude.json"), filepath.Join(account, ".claude.json")
+	if err := providers.WriteJSON(defaultPath, map[string]any{"oauthAccount": "default", "mcpServers": map[string]any{"keep": "a", "drop": "b"}, "projects": map[string]any{"E:/one": map[string]any{}}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := providers.WriteJSON(accountPath, map[string]any{"oauthAccount": "account"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := prepareHistory(account, shared); err != nil {
+		t.Fatal(err)
+	}
+	read := func(path string) map[string]any {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		value, err := providers.DecodeObject(data)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return value
+	}
+	profile := read(accountPath)
+	delete(profile["mcpServers"].(map[string]any), "drop")
+	if err := providers.WriteJSON(accountPath, profile); err != nil {
+		t.Fatal(err)
+	}
+	global := read(defaultPath)
+	global["projects"].(map[string]any)["E:/two"] = map[string]any{}
+	if err := providers.WriteJSON(defaultPath, global); err != nil {
+		t.Fatal(err)
+	}
+	if err := prepareHistory(account, shared); err != nil {
+		t.Fatal(err)
+	}
+	for path, identity := range map[string]string{defaultPath: "default", accountPath: "account"} {
+		value := read(path)
+		servers := value["mcpServers"].(map[string]any)
+		projects := value["projects"].(map[string]any)
+		if value["oauthAccount"] != identity || servers["drop"] != nil || servers["keep"] != "a" || projects["E:/two"] == nil {
+			t.Fatalf("preference changes not propagated in %s: %v", path, value)
+		}
+	}
+	if err := os.Mkdir(defaultPath+".lock", 0700); err != nil {
+		t.Fatal(err)
+	}
+	profile = read(accountPath)
+	delete(profile["mcpServers"].(map[string]any), "keep")
+	if err := providers.WriteJSON(accountPath, profile); err != nil {
+		t.Fatal(err)
+	}
+	if err := prepareHistory(account, shared); err != nil {
+		t.Fatal(err)
+	}
+	if read(defaultPath)["mcpServers"].(map[string]any)["keep"] != "a" {
+		t.Fatal("profile written while Claude Code held its lock")
+	}
+	if _, err := os.Stat(defaultPath + ".lock"); err != nil {
+		t.Fatal("Claude Code lock was removed")
+	}
+}
+
+// TestDesktopDeletedSessions 验证删除的 Desktop 会话不会在切换后恢复
+func TestDesktopDeletedSessions(t *testing.T) {
+	directory := t.TempDir()
+	first := ClaudeProfile{ID: "first", AccountUUID: uuid.NewString(), OrganizationUUID: uuid.NewString(), DesktopSaved: true}
+	second := ClaudeProfile{ID: "second", AccountUUID: uuid.NewString(), OrganizationUUID: uuid.NewString(), DesktopSaved: true}
+	firstRoot := filepath.Join(directory, "claude-code-sessions", first.AccountUUID, first.OrganizationUUID)
+	secondRoot := filepath.Join(directory, "claude-code-sessions", second.AccountUUID, second.OrganizationUUID)
+	past := time.Now().Add(-time.Hour)
+	for path, data := range map[string]string{
+		filepath.Join(firstRoot, "local_gone.json"):     `{"cliSessionId":"gone"}`,
+		filepath.Join(firstRoot, "local_kept.json"):     `{"cliSessionId":"kept"}`,
+		filepath.Join(secondRoot, "deleted_gone"):       "1",
+		filepath.Join(firstRoot, "deleted_revived"):     "1",
+		filepath.Join(secondRoot, "local_revived.json"): `{"cliSessionId":"revived"}`,
+	} {
+		if err := providers.WriteBytes(path, []byte(data)); err != nil {
+			t.Fatal(err)
+		}
+		if strings.HasPrefix(filepath.Base(path), "local_") || filepath.Dir(path) == firstRoot {
+			if err := os.Chtimes(path, past, past); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	future := time.Now().Add(time.Minute)
+	if err := os.Chtimes(filepath.Join(secondRoot, "local_revived.json"), future, future); err != nil {
+		t.Fatal(err)
+	}
+	profiles := []ClaudeProfile{first, second}
+	if err := syncDesktopCodeHistory(directory, first, profiles); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(firstRoot, "local_gone.json")); !os.IsNotExist(err) {
+		t.Fatal("deleted session restored")
+	}
+	if _, err := os.Stat(filepath.Join(firstRoot, "deleted_gone")); err != nil {
+		t.Fatal("deletion marker not synchronized")
+	}
+	if _, err := os.Stat(filepath.Join(firstRoot, "local_kept.json")); err != nil {
+		t.Fatal("kept session removed")
+	}
+	if _, err := os.Stat(filepath.Join(firstRoot, "local_revived.json")); err != nil {
+		t.Fatal("session used after deletion was not restored")
+	}
+	if _, err := os.Stat(filepath.Join(firstRoot, "deleted_revived")); !os.IsNotExist(err) {
+		t.Fatal("stale deletion marker kept beside a newer session")
+	}
+	if err := syncDesktopCodeHistory(directory, second, profiles); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(secondRoot, "deleted_revived")); !os.IsNotExist(err) {
+		t.Fatal("stale deletion marker copied to the other account")
+	}
+	if _, err := os.Stat(filepath.Join(secondRoot, "local_gone.json")); !os.IsNotExist(err) {
+		t.Fatal("deleted session copied to the other account")
+	}
+	if _, err := os.Stat(filepath.Join(secondRoot, "local_kept.json")); err != nil {
+		t.Fatal("kept session not shared")
+	}
+}
+
+// TestRestoreSharedDirectory 验证 Claude Code 清理删除空的共享目录后为账号联接重建目标
+func TestRestoreSharedDirectory(t *testing.T) {
+	home := t.TempDir()
+	dataDir := filepath.Join(home, "data")
+	shared := filepath.Join(home, ".claude")
+	profile := ClaudeProfile{ID: strings.ReplaceAll(uuid.NewString(), "-", "")}
+	profile.ConfigDirectory = filepath.Join(dataDir, "claude-accounts", profile.ID)
+	if err := prepareHistory(profile.ConfigDirectory, shared); err != nil {
+		t.Fatal(err)
+	}
+	store := &Store{dataDir: dataDir, home: home, claude: []ClaudeProfile{profile}}
+	for _, name := range []string{"plans", "notes"} {
+		path := filepath.Join(shared, name)
+		if err := os.RemoveAll(path); err != nil {
+			t.Fatal(err)
+		}
+		if err := store.RestoreSharedDirectory(path); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(profile.ConfigDirectory, "plans", "plan.md"), []byte("plan"), 0600); err != nil {
+		t.Fatalf("account plans link still broken: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(shared, "notes")); !os.IsNotExist(err) {
+		t.Fatal("directory without an account link was recreated")
 	}
 }

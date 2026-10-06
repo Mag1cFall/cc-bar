@@ -2,7 +2,6 @@ package accounts
 
 import (
 	"context"
-	"encoding/json"
 	"io"
 	"net/http"
 	"os"
@@ -122,48 +121,5 @@ func TestClaudeRefreshStatus(t *testing.T) {
 				t.Fatalf("失败响应未保留原有额度：%v", err)
 			}
 		})
-	}
-}
-
-// TestInstalledClaudeState 只读核对本机账号在新判定下的登录状态
-func TestInstalledClaudeState(t *testing.T) {
-	if os.Getenv("CCBAR_LIVE_READ") != "1" {
-		t.Skip("本机账号读取按需运行")
-	}
-	data, err := os.ReadFile(filepath.Join(os.Getenv("LOCALAPPDATA"), "CCBar", "claude-accounts.json"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	var profiles []ClaudeProfile
-	if err := json.Unmarshal(data, &profiles); err != nil {
-		t.Fatal(err)
-	}
-	home, err := os.UserHomeDir()
-	if err != nil {
-		t.Fatal(err)
-	}
-	store := &Store{dataDir: t.TempDir(), home: home, claude: profiles}
-	for _, profile := range store.ListClaude() {
-		credential, err := store.readClaude(profile)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if hasCompleteCodeLogin(credential) && profile.NeedsLogin {
-			t.Fatalf("完整账号仍提示重新登录：%s", profile.Name)
-		}
-		t.Logf("账号=%s 完整Code=%t 需要登录=%t Desktop已保存=%t", profile.Name, hasCompleteCodeLogin(credential), profile.NeedsLogin, profile.DesktopSaved)
-		if os.Getenv("CCBAR_LIVE_CAPTURE") == "1" {
-			root := t.TempDir()
-			cached := profile
-			cached.ConfigDirectory, cached.UsesDefaultConfig = "", false
-			capture := &Store{dataDir: filepath.Join(root, "data"), home: filepath.Join(root, "home"), claude: []ClaudeProfile{cached}}
-			source := filepath.Join(os.Getenv("LOCALAPPDATA"), "CCBar", "claude-desktop", profile.ID)
-			started := time.Now()
-			saved, err := capture.checkpointDesktop(&desktopApp{Directory: source})
-			if err != nil || saved == nil || !capture.HasDesktopSession(*saved) {
-				t.Fatalf("已有完整会话隔离保存失败：%v", err)
-			}
-			t.Logf("本机已保存会话隔离保存=%s 身份匹配=%t", time.Since(started), saved.AccountUUID == profile.AccountUUID)
-		}
 	}
 }

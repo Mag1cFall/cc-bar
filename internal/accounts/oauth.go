@@ -397,7 +397,10 @@ func (store *Store) loginDesktop(attempt *loginAttempt) error {
 			cookieBaseline, _ = readDesktopCookieState(desktop.Directory)
 		} else if !openedCode {
 			store.loginStage(attempt, "linking", nil)
-			command := execDesktopCode(desktop.Executable)
+			command, err := execDesktopCode(desktop.Executable)
+			if err != nil {
+				return err
+			}
 			if err := command.Start(); err != nil {
 				return err
 			}

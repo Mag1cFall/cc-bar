@@ -214,8 +214,12 @@ foreach ($process in $closing) {
 
 // launch 直接运行原 Desktop 可执行文件并沿用其原生登录入口
 func (desktop *desktopApp) launch() error {
+	environment, err := desktopEnvironment()
+	if err != nil {
+		return err
+	}
 	command := exec.Command(desktop.Executable)
-	command.Env = desktopEnvironment()
+	command.Env = environment
 	command.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
 	if err := command.Start(); err != nil {
 		return err
@@ -226,23 +230,31 @@ func (desktop *desktopApp) launch() error {
 }
 
 // execDesktopCode 用当前 Desktop 的深链接初始化 Code 登录
-func execDesktopCode(executable string) *exec.Cmd {
+func execDesktopCode(executable string) (*exec.Cmd, error) {
+	environment, err := desktopEnvironment()
+	if err != nil {
+		return nil, err
+	}
 	command := exec.Command(executable, "claude://code/new")
-	command.Env = desktopEnvironment()
+	command.Env = environment
 	command.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
-	return command
+	return command, nil
 }
 
-// desktopEnvironment 保持 Desktop 的共享记录目录独立于 CLI 账号变量
-func desktopEnvironment() []string {
+// desktopEnvironment 以当前用户默认环境启动 Desktop 并保持共享记录目录独立于 CLI 账号变量
+func desktopEnvironment() ([]string, error) {
+	base, err := userEnvironment()
+	if err != nil {
+		return nil, err
+	}
 	var result []string
-	for _, entry := range os.Environ() {
+	for _, entry := range base {
 		key, _, _ := strings.Cut(entry, "=")
 		if !strings.EqualFold(key, "CLAUDE_CONFIG_DIR") {
 			result = append(result, entry)
 		}
 	}
-	return result
+	return result, nil
 }
 
 // desktopIdentity 读取 Desktop 当前账号的原生标识

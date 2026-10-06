@@ -13,7 +13,7 @@ CCBar 自动读取本机已登录工具的额度，以及编程工具保存的�
 - **统计分析**：服务、模型和提供商聚合，日周月图表、环比、缓存命中率和 Fast 档位费用
 - **会话浏览**：全局搜索、项目筛选、分页、模型拆分和逐请求明细
 - **额度历史**：真实周期、额外重置与各账号独立的额度变化时间线
-- **账号管理**：Claude 官方登录与共享会话；额外 Codex 账号导入、排序、展示和重置次数管理
+- **账号管理**：多个 Claude 账号一键切换并共享会话与配置；导入额外的 Codex 账号，管理排序、显示和重置次数
 - **桌面集成**：托盘弹窗、可拖动悬浮窗、登录启动、隐私模式、中英双语和明暗主题
 
 ## 系统要求
@@ -26,7 +26,7 @@ CCBar 自动读取本机已登录工具的额度，以及编程工具保存的�
 | 管理 Claude 账号 | 添加账号时完成官方授权；同步 Desktop 需要已安装 Claude Desktop，启动 CLI 需要 Claude Code CLI |
 | 从源码构建 | Go 1.25+、Node.js 24、PowerShell 7 |
 
-EXE 内置 Microsoft WebView2 固定版运行库，首次启动自动释放到应用数据目录，后续启动直接复用。运行 CCBar 无需预装 Edge 或系统 WebView2，首次释放运行库也可离线完成。
+EXE 内置 Microsoft WebView2 固定版运行库，首次启动时解压到应用数据目录，之后直接复用。无需预装 Edge 或系统 WebView2，首次启动也不需要联网。
 
 ## 快速开始
 
@@ -42,7 +42,7 @@ EXE 内置 Microsoft WebView2 固定版运行库，首次启动自动释放到�
 
 左下角的月亮或太阳按钮可快速切换明暗模式。在「设置 → 外观与显示 → 主题」选择「跟随系统」「浅色」或「深色」，主窗口、托盘弹窗与悬浮窗同步切换。
 
-关闭主窗口后，应用继续驻留托盘。完整退出时使用托盘菜单的「退出」。「登录时启动」使用当前 EXE 所在路径；移动 EXE 后重新打开应用并保存该设置。
+关闭主窗口后，应用继续驻留托盘。完整退出时使用托盘菜单的「退出」。「登录时启动」记录的是当前 EXE 的路径，移动 EXE 后需要重新打开应用并保存一次该设置。
 
 在「通用 → 更新」点击「检查更新」，可以检查 [Mag1cFall/cc-bar 的 Windows Release](https://github.com/Mag1cFall/cc-bar/releases)。发现新版本后点击「下载并安装」，确认后会替换当前 EXE 并重启。设置与会话记录继续保存在原数据目录。请将 EXE 放在当前用户有写入权限的目录，例如 `%LOCALAPPDATA%\Programs\CCBar`。
 
@@ -50,13 +50,13 @@ EXE 内置 Microsoft WebView2 固定版运行库，首次启动自动释放到�
 
 打开设置的「Claude 账号」，点击「保存当前登录」保存现有登录。已安装 Desktop 时，CCBar 保存 Chat/Cowork 的网页登录和 Code 凭据，保存期间 Desktop 会短暂关闭并重新打开。首次启用 Code 时，按 Desktop 页面的提示完成连接。
 
-点击「添加账号」直接开始登录，账号名称从邮箱自动生成，随后可重命名。已安装 Desktop 时，在原生 Desktop 完成登录，CCBar 自动连接 Code 并保存完整会话；仅使用 CLI 时，通过系统浏览器授权与本机回调自动完成。登录进度显示在账号页面，取消后恢复此前的 Desktop 登录。
+点击「添加账号」直接开始登录，账号名称从邮箱自动生成，随后可重命名。已安装 Desktop 时，在 Desktop 里完成登录，CCBar 会自动连接 Code 并保存；只用 CLI 时，在系统浏览器里完成授权即可。登录进度显示在账号页面，取消后恢复此前的 Desktop 登录。
 
-点击「切换」同时更新 CLI 默认账号及 Desktop 的 Chat、Cowork 和 Code 登录，Desktop 会重新打开。账号在完整登录保存后进入可切换列表。「启动」使用本机终端实际解析到的 `claude` 命令，支持 PowerShell 函数、别名和脚本入口。
+点击「切换」会把该账号设为新终端的默认账号，并让 Desktop 以该账号重新打开 Chat、Cowork 和 Code。账号完成登录并保存后才能切换。点击「启动」会打开一个只使用该账号的新终端并运行 Claude Code，默认账号和 Desktop 保持不变；命令取本机终端实际解析到的 `claude`，支持 PowerShell 函数、别名和脚本。
 
-账号的登录信息各自保存，CLI 项目会话、历史索引、任务和计划共享，偏好与 MCP 设置同步使用。切换时同步 Desktop Code 的本地会话列表与最新会话信息，记录与全局偏好保留在原位置；Chat/Cowork 的云端记录按所选账号展示。已经运行的 CLI 终端继续使用启动时选择的账号。
+每个账号只单独保存登录凭据和账号状态，其余 CLI 配置共享，包括项目会话、历史、任务、计划、全局指令（CLAUDE.md）、技能、插件和设置；项目信任、全局偏好和 MCP 设置在各账号间同步。切换、启动或登录账号时检查共享链接，发现断开会修复；Claude Code 清理掉空的共享目录后，CCBar 会立即重建。切换时，Desktop Code 的本地会话列表会带到新账号，已删除的会话不会重新出现；Chat/Cowork 的云端记录显示所选账号自己的内容。已经打开的 CLI 终端仍使用打开时的账号。
 
-Claude CLI 安装步骤见 [官方安装页面](https://code.claude.com/docs/en/setup)。在终端运行 `claude --version` 可确认安装成功。在相同工作目录执行 `claude --resume` 可以继续共享的项目会话。
+Claude CLI 安装步骤见 [官方安装页面](https://code.claude.com/docs/en/setup)。在终端运行 `claude --version` 可确认安装成功。在同一工作目录运行 `claude --resume`，可以接着其他账号的会话继续。
 
 ### 统计来源
 
@@ -70,7 +70,7 @@ Claude CLI 安装步骤见 [官方安装页面](https://code.claude.com/docs/en/
 | DSH | `%USERPROFILE%\.dsh\sessions` |
 | Cursor | 当前账号的远端计量记录 |
 
-额度百分比来自服务返回的限额；统计费用按日志 Tokens、模型和价格估算。订阅费、剩余额度和本地估算费用分别展示。
+额度百分比取自服务返回的数据；费用按日志里的 Tokens 数、模型和单价估算。订阅费、剩余额度和本地估算费用分开显示。
 
 ## 数据与常见问题
 
@@ -79,10 +79,11 @@ CCBar 的设置、数据库和运行日志保存在 `%LOCALAPPDATA%\CCBar`。设
 | 看到的情况 | 处理方式 |
 | --- | --- |
 | 服务显示未检测到 | 在对应工具中完成登录，随后点击刷新 |
-| 账号提示重新登录 | 在账号页面运行官方登录流程 |
+| 账号提示重新登录 | 在账号页面重新登录 |
 | 统计列表为空 | 确认会话已产生，启用该数据来源并运行扫描 |
-| 额度刷新受限 | 等待服务的退避时间，再查看更新 |
+| 额度刷新受限 | 等服务限制时间结束，CCBar 会自动重试 |
 | 切换后旧终端仍使用原账号 | 新开终端，或在账号页面点击「启动」 |
+| 长会话前面的命令或子代理不显示 | Desktop 重启后只加载每个会话最后 50 MB 的记录 |
 | 需要反馈问题 | 提供系统与应用版本、复现步骤，以及设置页导出的诊断包 |
 
 ## 源码构建
@@ -93,6 +94,7 @@ CCBar 的设置、数据库和运行日志保存在 `%LOCALAPPDATA%\CCBar`。设
 cd web
 npm ci
 npm run lint
+npm test
 npm run build
 cd ..
 go install github.com/wailsapp/wails/v3/cmd/wails3@v3.0.0-beta.27
@@ -111,7 +113,7 @@ go build -trimpath -tags production -ldflags '-s -w -H windowsgui' -o dist/CCBar
 
 构建 ARM64 时，将对应 ARM64 CAB 保存为 `internal/browser/runtime.cab`，资源生成参数使用 `-arch arm64 -out cmd/ccbar/rsrc_windows_arm64.syso`，设置 `$env:GOARCH = 'arm64'`，输出文件使用 `dist/CCBar-arm64.exe`。
 
-`windows.manifest` 和 `version.json` 是生成 EXE 资源的固定输入，分别提供权限与 DPI 清单、文件版本和名称。运行发布版时双击 `CCBar.exe` 即可。
+`windows.manifest` 提供权限与 DPI 设置，`version.json` 提供文件版本和名称，二者在生成 EXE 资源时使用。
 
 完成首次构建后，前端开发使用 Vite 热更新。在一个终端启动前端：
 
@@ -176,7 +178,7 @@ cc-bar/
 │   │   ├── desktop_switch.go     Desktop 完整登录保存与切换
 │   │   ├── desktop_session_windows.go 原生安装发现与会话文件
 │   │   ├── platform_windows.go   PowerShell 入口、环境变量与目录联接
-│   │   ├── history.go            共享会话、任务、历史与 MCP 设置
+│   │   ├── history.go            共享配置、会话与历史，同步全局偏好与 MCP 设置
 │   │   ├── codex.go              Codex 账号导入、排序与展示
 │   │   ├── credits.go            Codex 重置次数管理
 │   │   ├── accounts_test.go      账号隔离与历史共享检查

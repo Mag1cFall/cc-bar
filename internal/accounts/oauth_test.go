@@ -3,8 +3,6 @@ package accounts
 import (
 	"bytes"
 	"context"
-	"crypto/aes"
-	"crypto/cipher"
 	"crypto/sha256"
 	"database/sql"
 	"encoding/base64"
@@ -24,7 +22,6 @@ import (
 	"time"
 
 	"github.com/Mag1cFall/cc-bar/internal/providers"
-	"github.com/Mag1cFall/cc-bar/internal/secrets"
 	"github.com/google/uuid"
 )
 
@@ -402,64 +399,6 @@ func TestDesktopCookies(t *testing.T) {
 	}
 }
 
-// TestDesktopCookieRead 核对当前 Cookie 类型与账号身份并沿用原登录
-func TestDesktopCookieRead(t *testing.T) {
-	if os.Getenv("CCBAR_LIVE_READ") != "1" {
-		t.Skip("本机 Cookie 读取按需运行")
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-	defer cancel()
-	desktop, err := findDesktop(ctx)
-	if err != nil || desktop == nil {
-		t.Fatalf("读取原生目录: %v", err)
-	}
-	if err := desktop.close(ctx); err != nil {
-		t.Fatal(err)
-	}
-	defer func() {
-		if err := desktop.launch(); err != nil {
-			t.Error(err)
-		}
-	}()
-	data, err := os.ReadFile(filepath.Join(desktop.Directory, "Network", "Cookies"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	path := filepath.Join(t.TempDir(), "Cookies")
-	if err := os.WriteFile(path, data, 0600); err != nil {
-		t.Fatal(err)
-	}
-	database, err := sql.Open("sqlite", path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer database.Close()
-	rows, err := database.Query(`SELECT name, host_key, length(encrypted_value) > 0 OR length(value) > 0 FROM cookies WHERE name LIKE 'sessionKey%'`)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer rows.Close()
-	for rows.Next() {
-		var name, domain string
-		var present bool
-		if err := rows.Scan(&name, &domain, &present); err != nil {
-			t.Fatal(err)
-		}
-		t.Logf("Cookie类型=%s 域=%s 有凭据=%t", name, domain, present)
-	}
-	if err := rows.Err(); err != nil {
-		t.Fatal(err)
-	}
-	if !desktopWebSession(desktop.Directory) {
-		t.Fatal("已登录的 Desktop 缺少识别到的网页凭据")
-	}
-	credential, err := providers.ReadClaudeDesktopDirectory(desktop.Directory, nil)
-	if err != nil || credential == nil {
-		t.Fatalf("读取 Code 身份: %v", err)
-	}
-	t.Logf("Desktop=%s Code=%s 身份一致=%t", desktopIdentity(desktop.Directory), credential.AccountUUID, desktopIdentity(desktop.Directory) == credential.AccountUUID)
-}
-
 // TestInstalledDesktopRead 验证本机实际安装与 OAuth 身份读取而保持登录原样
 func TestInstalledDesktopRead(t *testing.T) {
 	if os.Getenv("CCBAR_LIVE_READ") != "1" {
@@ -645,8 +584,12 @@ func readDesktopCodeWindow(t *testing.T, desktop *desktopApp, profile ClaudeProf
 	if err := desktop.close(ctx); err != nil {
 		t.Fatal(err)
 	}
+	environment, err := desktopEnvironment()
+	if err != nil {
+		t.Fatal(err)
+	}
 	command := exec.Command(desktop.Executable, "--force-renderer-accessibility")
-	command.Env = desktopEnvironment()
+	command.Env = environment
 	command.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
 	if err := command.Start(); err != nil {
 		t.Fatal(err)
@@ -693,104 +636,4 @@ do {
 		t.Fatalf("Desktop 实际会话列表不完整: %s %v", output, err)
 	}
 	return counts.Matched
-}
-
-// TestDesktopWebIdentity 核对保存的网页会话在服务端对应的实际账号
-func TestDesktopWebIdentity(t *testing.T) {
-	if os.Getenv("CCBAR_LIVE_READ") != "1" {
-		t.Skip("本机网页身份检查按需运行")
-	}
-	store, err := New(filepath.Join(os.Getenv("LOCALAPPDATA"), "CCBar"), "")
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, profile := range store.ListClaude() {
-		directory := store.desktopSession(profile)
-		stateData, err := os.ReadFile(filepath.Join(directory, "Local State"))
-		if err != nil {
-			t.Fatal(err)
-		}
-		state, err := providers.DecodeObject(stateData)
-		if err != nil {
-			t.Fatal(err)
-		}
-		crypt := state["os_crypt"].(map[string]any)
-		wrapped, err := base64.StdEncoding.DecodeString(crypt["encrypted_key"].(string))
-		if err != nil {
-			t.Fatal(err)
-		}
-		key, err := secrets.UnprotectBytes(wrapped[5:])
-		if err != nil {
-			t.Fatal(err)
-		}
-		block, err := aes.NewCipher(key)
-		if err != nil {
-			t.Fatal(err)
-		}
-		gcm, err := cipher.NewGCM(block)
-		if err != nil {
-			t.Fatal(err)
-		}
-		database, err := sql.Open("sqlite", "file:"+filepath.ToSlash(filepath.Join(directory, "Network", "Cookies"))+"?mode=ro")
-		if err != nil {
-			t.Fatal(err)
-		}
-		var version int
-		if err := database.QueryRow(`SELECT value FROM meta WHERE key='version'`).Scan(&version); err != nil {
-			t.Fatal(err)
-		}
-		rows, err := database.Query(`SELECT name, value, encrypted_value FROM cookies WHERE host_key IN ('.claude.ai', 'claude.ai') AND (name LIKE 'sessionKey%' OR name = 'lastActiveOrg')`)
-		if err != nil {
-			t.Fatal(err)
-		}
-		request, _ := http.NewRequest(http.MethodGet, "https://claude.ai/api/bootstrap", nil)
-		request.Header.Set("Accept", "application/json")
-		request.Header.Set("User-Agent", "Mozilla/5.0 Chrome/138.0.0.0 Safari/537.36")
-		for rows.Next() {
-			var name, value string
-			var encrypted []byte
-			if err := rows.Scan(&name, &value, &encrypted); err != nil {
-				t.Fatal(err)
-			}
-			if len(encrypted) > 31 {
-				plain, err := gcm.Open(nil, encrypted[3:15], encrypted[15:], nil)
-				if err != nil {
-					t.Fatal(err)
-				}
-				if version >= 24 {
-					plain = plain[32:]
-				}
-				value = string(plain)
-			}
-			request.AddCookie(&http.Cookie{Name: name, Value: value})
-		}
-		if err := rows.Err(); err != nil {
-			t.Fatal(err)
-		}
-		rows.Close()
-		database.Close()
-		response, err := providers.HTTPClient.Do(request)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if response.StatusCode != http.StatusOK {
-			response.Body.Close()
-			t.Fatalf("%s 网页身份查询返回 HTTP %d", profile.Email, response.StatusCode)
-		}
-		var bootstrap struct {
-			Account struct {
-				UUID  string `json:"uuid"`
-				Email string `json:"email_address"`
-			} `json:"account"`
-		}
-		err = json.NewDecoder(response.Body).Decode(&bootstrap)
-		response.Body.Close()
-		if err != nil {
-			t.Fatal(err)
-		}
-		t.Logf("网页账号=%s 已保存账号=%s 实际身份一致=%t", bootstrap.Account.Email, profile.Email, bootstrap.Account.UUID == profile.AccountUUID)
-		if bootstrap.Account.UUID != profile.AccountUUID {
-			t.Error("网页会话与 Code 账号不一致")
-		}
-	}
 }

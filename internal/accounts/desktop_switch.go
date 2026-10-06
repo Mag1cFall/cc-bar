@@ -98,7 +98,10 @@ func (store *Store) saveCurrentDesktop(desktop *desktopApp) (profile *ClaudeProf
 				return nil, err
 			}
 		}
-		command := execDesktopCode(desktop.Executable)
+		command, err := execDesktopCode(desktop.Executable)
+		if err != nil {
+			return nil, err
+		}
 		if err := command.Start(); err != nil {
 			return nil, err
 		}

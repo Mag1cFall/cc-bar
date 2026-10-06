@@ -12,7 +12,7 @@ import (
 	"gopkg.in/natefinch/lumberjack.v2"
 )
 
-var version = "0.1.3"
+var version = "0.1.4"
 
 func main() {
 	if err := run(); err != nil {

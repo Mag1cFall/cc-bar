@@ -45,8 +45,8 @@ func FindClaude(home string) (ClaudeCLI, error) {
 	return ClaudeCLI{}, errors.New("请将 Claude Code 的启动命令加入 PATH")
 }
 
-// cliEnvironment 为官方账号清除会覆盖 OAuth 的第三方登录变量
-func cliEnvironment(profile ClaudeProfile) []string {
+// cliEnvironment 以当前用户默认环境为基础并清除会覆盖 OAuth 的第三方登录变量
+func cliEnvironment(profile ClaudeProfile) ([]string, error) {
 	remove := map[string]bool{
 		"CLAUDE_CONFIG_DIR":       true,
 		"ANTHROPIC_API_KEY":       true,
@@ -58,8 +58,12 @@ func cliEnvironment(profile ClaudeProfile) []string {
 		"CLAUDE_CODE_USE_FOUNDRY": true,
 		"ANTHROPIC_PROFILE":       true,
 	}
+	base, err := userEnvironment()
+	if err != nil {
+		return nil, err
+	}
 	var environment []string
-	for _, entry := range os.Environ() {
+	for _, entry := range base {
 		key, _, _ := strings.Cut(entry, "=")
 		if !remove[strings.ToUpper(key)] {
 			environment = append(environment, entry)
@@ -68,7 +72,7 @@ func cliEnvironment(profile ClaudeProfile) []string {
 	if !profile.UsesDefaultConfig {
 		environment = append(environment, "CLAUDE_CONFIG_DIR="+profile.ConfigDirectory)
 	}
-	return environment
+	return environment, nil
 }
 
 func (store *Store) cliProfile(id string) (ClaudeProfile, error) {
@@ -107,9 +111,13 @@ func (store *Store) StartClaude(id, workingDir string) error {
 	if workingDir == "" {
 		workingDir = store.home
 	}
+	environment, err := cliEnvironment(profile)
+	if err != nil {
+		return err
+	}
 	command := claudeCommand(context.Background(), executable)
 	command.Dir = workingDir
-	command.Env = cliEnvironment(profile)
+	command.Env = environment
 	showConsole(command)
 	if err := command.Start(); err != nil {
 		return err

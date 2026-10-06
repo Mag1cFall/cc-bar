@@ -29,11 +29,12 @@ jobs:
         run: |
           npm ci
           npm run lint
+          npm test
           npm run build
       - name: EXE 构建与关键行为检查
         shell: pwsh
         run: |
-          $version = '0.1.3'
+          $version = '0.1.4'
           if ($env:GITHUB_REF_TYPE -eq 'tag') { $version = $env:GITHUB_REF_NAME.TrimStart('v') }
           $ErrorActionPreference = 'Stop'
           $PSNativeCommandUseErrorActionPreference = $true

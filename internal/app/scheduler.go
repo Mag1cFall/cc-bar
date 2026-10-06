@@ -183,6 +183,11 @@ func (service *Service) watchLogs() {
 			if event.Has(fsnotify.Write) || event.Has(fsnotify.Create) || event.Has(fsnotify.Rename) || event.Has(fsnotify.Remove) {
 				service.dirty.Store(true)
 			}
+			if event.Has(fsnotify.Remove) || event.Has(fsnotify.Rename) {
+				if restoreErr := service.accounts.RestoreSharedDirectory(event.Name); restoreErr != nil {
+					service.logger.Warn("Claude 共享记录目录重建失败", "path", event.Name, "error", restoreErr)
+				}
+			}
 			if event.Has(fsnotify.Create) {
 				if info, statErr := os.Stat(event.Name); statErr == nil && info.IsDir() {
 					watchDirectory(event.Name)

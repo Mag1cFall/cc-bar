@@ -19,6 +19,16 @@ import (
 	"golang.org/x/sys/windows/registry"
 )
 
+// userEnvironment 返回当前用户的默认环境变量，不含 CCBar 进程自身继承的变量
+func userEnvironment() ([]string, error) {
+	token, err := windows.OpenCurrentProcessToken()
+	if err != nil {
+		return nil, err
+	}
+	defer token.Close()
+	return token.Environ(false)
+}
+
 // longPath 展开 Windows 短文件名并保留目录联接原本的位置
 func longPath(path string) (string, error) {
 	name, err := windows.UTF16PtrFromString(path)
@@ -87,9 +97,14 @@ func findPowerShellClaude() (ClaudeCLI, bool, error) {
 		if err != nil {
 			continue
 		}
+		environment, err := userEnvironment()
+		if err != nil {
+			return ClaudeCLI{}, false, err
+		}
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		query := "$command = Get-Command claude -ErrorAction SilentlyContinue; if ($command) { Write-Output ('CCBAR_CLAUDE:' + (@{ path = $command.Source; kind = [string]$command.CommandType } | ConvertTo-Json -Compress)) }"
 		command := exec.CommandContext(ctx, shell, "-NoLogo", "-NonInteractive", "-Command", query)
+		command.Env = environment
 		showConsole(command)
 		output, runErr := command.Output()
 		cancel()

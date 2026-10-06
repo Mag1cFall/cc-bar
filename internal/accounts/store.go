@@ -399,6 +399,30 @@ func (store *Store) RemoveClaude(id string) error {
 	return store.saveClaudeLocked()
 }
 
+// RestoreSharedDirectory 在 Claude Code 清理删掉空的共享记录目录后重建它，保持账号目录中的联接有效
+func (store *Store) RestoreSharedDirectory(path string) error {
+	shared := filepath.Join(store.home, ".claude")
+	if !strings.EqualFold(filepath.Clean(filepath.Dir(path)), filepath.Clean(shared)) {
+		return nil
+	}
+	if _, err := os.Lstat(path); !os.IsNotExist(err) {
+		return err
+	}
+	store.mu.Lock()
+	linked := slices.ContainsFunc(store.claude, func(profile ClaudeProfile) bool {
+		if profile.UsesDefaultConfig || !store.isManaged(profile) {
+			return false
+		}
+		info, err := os.Lstat(filepath.Join(profile.ConfigDirectory, filepath.Base(path)))
+		return err == nil && info.Mode()&(os.ModeSymlink|os.ModeIrregular) != 0
+	})
+	store.mu.Unlock()
+	if !linked {
+		return nil
+	}
+	return os.MkdirAll(path, 0700)
+}
+
 // RefreshClaude 遵守额度退避并隔离切换期间的旧响应
 func (store *Store) RefreshClaude(ctx context.Context) error {
 	store.refreshMu.Lock()

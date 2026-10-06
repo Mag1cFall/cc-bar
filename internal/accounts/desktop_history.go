@@ -38,7 +38,7 @@ func desktopCodeDirectory(directory string, profile ClaudeProfile) (string, erro
 	return root, nil
 }
 
-// syncDesktopCodeHistory 将最新本地会话信息同步到所选账号
+// syncDesktopCodeHistory 将最新本地会话与删除标记同步到所选账号
 func syncDesktopCodeHistory(directory string, selected ClaudeProfile, profiles []ClaudeProfile) error {
 	target, err := desktopCodeDirectory(directory, selected)
 	if err != nil {
@@ -65,7 +65,8 @@ func syncDesktopCodeHistory(directory string, selected ClaudeProfile, profiles [
 			return err
 		}
 		for _, entry := range entries {
-			if !strings.HasPrefix(entry.Name(), "local_") || !strings.HasSuffix(entry.Name(), ".json") {
+			name := entry.Name()
+			if !(strings.HasPrefix(name, "local_") && strings.HasSuffix(name, ".json")) && !strings.HasPrefix(name, "deleted_") {
 				continue
 			}
 			info, err := entry.Info()
@@ -82,12 +83,39 @@ func syncDesktopCodeHistory(directory string, selected ClaudeProfile, profiles [
 	}
 	for name, source := range sources {
 		destination := filepath.Join(target, name)
+		if strings.HasPrefix(name, "local_") {
+			marker := files["deleted_"+strings.TrimSuffix(strings.TrimPrefix(name, "local_"), ".json")]
+			if marker != nil && !marker.ModTime().Before(files[name].ModTime()) {
+				if err := os.Remove(destination); err != nil && !os.IsNotExist(err) {
+					return err
+				}
+				continue
+			}
+		}
+		if strings.HasPrefix(name, "deleted_") {
+			if session := files["local_"+strings.TrimPrefix(name, "deleted_")+".json"]; session != nil && session.ModTime().After(files[name].ModTime()) {
+				if err := os.Remove(destination); err != nil && !os.IsNotExist(err) {
+					return err
+				}
+				continue
+			}
+		}
 		if sameDirectory(source, destination) {
 			continue
 		}
 		data, err := os.ReadFile(source)
 		if err != nil {
 			return err
+		}
+		if !strings.HasPrefix(name, "local_") {
+			if err := providers.WriteBytes(destination, data); err != nil {
+				return err
+			}
+			modified := files[name].ModTime()
+			if err := os.Chtimes(destination, modified, modified); err != nil {
+				return err
+			}
+			continue
 		}
 		var record struct {
 			CLISessionID  string `json:"cliSessionId"`
