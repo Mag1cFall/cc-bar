@@ -124,7 +124,11 @@ export default function Accounts() {
       </Section>
       <footer className="account-footer">
         <span>
-          {accounts.length} {tr('accounts', '个账号')}
+          {accounts.length} {tr('accounts', '个账号')} ·{' '}
+          {tr(
+            `Auto-refresh every ${snapshot.settings.quotaIntervalMinutes} min`,
+            `每 ${snapshot.settings.quotaIntervalMinutes} 分钟自动刷新`,
+          )}
         </span>
         <Button tone="ghost" disabled={busy || signingIn} onClick={() => run(api.refreshClaude)}>
           <RefreshCw size={14} />
@@ -330,6 +334,7 @@ function AccountCard({
   const privacy = snapshot.settings.privacyMode
   const email = privacy ? '••••@••••' : (account.email ?? tr('Not signed in', '尚未登录'))
   const displayName = privacy ? tr('Claude account', 'Claude 账号') : account.name
+  const plan = account.snapshot?.planType || account.plan
   return (
     <Card className={`account-card ${account.isActive || account.desktopActive ? 'current-account' : ''}`}>
       <div className="account-heading">
@@ -344,7 +349,7 @@ function AccountCard({
           </div>
           <p className="ellipsis" title={email}>
             {email}
-            {account.plan ? ` · ${account.plan}` : ''}
+            {plan ? ` · ${plan}` : ''}
           </p>
           {account.isLoggingIn ? (
             <Status kind="low" text={tr('Waiting for sign-in…', '等待登录完成…')} />

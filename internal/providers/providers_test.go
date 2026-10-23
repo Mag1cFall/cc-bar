@@ -88,3 +88,46 @@ func TestQuotaProtocol(t *testing.T) {
 		t.Fatal("Antigravity grouped limits were lost")
 	}
 }
+
+// TestClaudePlan 验证套餐按官方资料识别升级且不改动调用方凭据
+func TestClaudePlan(t *testing.T) {
+	previous := HTTPClient
+	defer func() { HTTPClient = previous }()
+	profiles := 0
+	profileStatus := 200
+	HTTPClient = &http.Client{Transport: fixtureTransport(func(request *http.Request) (*http.Response, error) {
+		switch request.URL.Path {
+		case "/api/oauth/usage":
+			return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(`{"limits":[{"kind":"session","percent":4}]}`))}, nil
+		case "/api/oauth/profile":
+			profiles++
+			return &http.Response{StatusCode: profileStatus, Body: io.NopCloser(strings.NewReader(`{"account":{"uuid":"account","email":"user@example.com"},"organization":{"uuid":"organization","organization_type":"claude_max","subscription_type":null,"billing_type":"stripe_subscription","rate_limit_tier":"default_claude_max_20x"}}`))}, nil
+		}
+		t.Fatalf("unexpected request %s", request.URL)
+		return nil, nil
+	})}
+	credential := &model.Credential{AccessToken: "plan-token", SubscriptionType: "pro", RateLimitTier: "default_claude_ai"}
+	upgraded, err := Fetch(context.Background(), model.Claude, credential)
+	if err != nil || upgraded.PlanType != "max 20x" {
+		t.Fatalf("Claude 升级后的套餐未识别: %v %+v", err, upgraded)
+	}
+	if credential.AccountUUID != "" || credential.SubscriptionType != "pro" {
+		t.Fatalf("套餐查询改动了调用方凭据: %+v", credential)
+	}
+	profileStatus = 429
+	again, err := Fetch(context.Background(), model.Claude, &model.Credential{AccessToken: "plan-token", SubscriptionType: "pro", RateLimitTier: "default_claude_ai"})
+	if err != nil || again.PlanType != "max 20x" || profiles != 1 {
+		t.Fatalf("套餐在一小时内重复查询或回退: 查询=%d %v %+v", profiles, err, again)
+	}
+	claudePlans.Lock()
+	entry := claudePlans.entries["plan-token"]
+	entry.checkedAt = time.Now().Add(-2 * time.Hour)
+	claudePlans.entries["plan-token"] = entry
+	claudePlans.Unlock()
+	for range 2 {
+		limited, err := Fetch(context.Background(), model.Claude, &model.Credential{AccessToken: "plan-token", SubscriptionType: "pro", RateLimitTier: "default_claude_ai"})
+		if err != nil || limited.PlanType != "max 20x" || profiles != 2 {
+			t.Fatalf("资料查询失败后套餐回退或未退避: 查询=%d %v %+v", profiles, err, limited)
+		}
+	}
+}

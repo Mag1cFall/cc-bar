@@ -111,7 +111,7 @@ func Fetch(ctx context.Context, app model.QuotaApp, credential *model.Credential
 		root, err = requestJSON(ctx, http.MethodGet, "https://api.anthropic.com/api/oauth/usage", credential, nil, map[string]string{"anthropic-beta": "oauth-2025-04-20", "User-Agent": "claude-code/2.1.0"})
 		if err == nil {
 			snapshot = ParseClaude(root)
-			snapshot.PlanType = credential.SubscriptionType
+			snapshot.PlanType = currentClaudePlan(ctx, credential)
 		}
 	case model.Cursor:
 		var root object

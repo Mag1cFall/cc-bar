@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"regexp"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/Mag1cFall/cc-bar/internal/model"
@@ -68,10 +70,52 @@ func FetchClaudeProfile(ctx context.Context, credential *model.Credential) error
 	if value := str(organization, "uuid", "organization_uuid"); value != "" {
 		credential.OrganizationUUID = value
 	}
-	credential.SubscriptionType = str(organization, "subscription_type", "organization_type", "billing_type")
+	credential.SubscriptionType = strings.TrimPrefix(str(organization, "subscription_type", "organization_type"), "claude_")
 	credential.RateLimitTier = str(organization, "rate_limit_tier")
 	if credential.AccountUUID == "" || credential.Email == "" || credential.OrganizationUUID == "" {
 		return errors.New("登录后的账号资料尚未完整")
 	}
 	return nil
+}
+
+var claudeTierMultiplier = regexp.MustCompile(`_(\d+x)$`)
+
+// claudePlanEntry 记录官方资料确认的套餐与最近一次查询时间
+type claudePlanEntry struct {
+	plan      string
+	checkedAt time.Time
+}
+
+var claudePlans = struct {
+	sync.Mutex
+	entries map[string]claudePlanEntry
+}{entries: map[string]claudePlanEntry{}}
+
+// claudePlan 返回带用量倍数的套餐名称
+func claudePlan(credential *model.Credential) string {
+	if match := claudeTierMultiplier.FindStringSubmatch(credential.RateLimitTier); credential.SubscriptionType != "" && match != nil {
+		return credential.SubscriptionType + " " + match[1]
+	}
+	return credential.SubscriptionType
+}
+
+// currentClaudePlan 每小时向官方资料核对一次套餐，查询失败时沿用上次确认的结果
+func currentClaudePlan(ctx context.Context, credential *model.Credential) string {
+	claudePlans.Lock()
+	entry := claudePlans.entries[credential.AccessToken]
+	claudePlans.Unlock()
+	if time.Since(entry.checkedAt) >= time.Hour {
+		profile := *credential
+		if FetchClaudeProfile(ctx, &profile) == nil {
+			entry.plan = claudePlan(&profile)
+		}
+		entry.checkedAt = time.Now()
+		claudePlans.Lock()
+		claudePlans.entries[credential.AccessToken] = entry
+		claudePlans.Unlock()
+	}
+	if entry.plan == "" {
+		return claudePlan(credential)
+	}
+	return entry.plan
 }

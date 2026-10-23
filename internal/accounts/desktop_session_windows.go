@@ -158,7 +158,7 @@ func (store *Store) desktopApp(ctx context.Context) (*desktopApp, error) {
 	return findDesktop(ctx)
 }
 
-// close 等待指定 Desktop 进程退出并释放会话文件
+// close 向 Desktop 发送会话结束通知并等待退出，超时后结束残留进程
 func (desktop *desktopApp) close(ctx context.Context) error {
 	script := fmt.Sprintf(`$ErrorActionPreference = 'Stop'
 $rootId = %d
@@ -178,16 +178,28 @@ do {
 } while ($children.Count -gt 0)
 $main = Get-Process -Id $rootId -ErrorAction SilentlyContinue
 if ($main -and -not $main.HasExited -and $main.Path -ieq $expected) {
-    try {
-        if ($main.CloseMainWindow()) {
-            $deadline = [DateTime]::UtcNow.AddSeconds(5)
-            do {
-                $main.Refresh()
-                if ($main.HasExited -or $main.MainWindowHandle -eq [IntPtr]::Zero) { break }
-                if ($main.WaitForExit(50)) { break }
-            } while ([DateTime]::UtcNow -lt $deadline)
-        }
-    } catch { if (-not $main.HasExited) { throw } }
+    Add-Type -Namespace CCBar -Name Window -MemberDefinition @'
+public const uint WM_ENDSESSION = 0x16;
+public const int ENDSESSION_CLOSEAPP = 1;
+public const uint SMTO_ABORTIFHUNG = 2;
+public delegate bool EnumWindowsProc(IntPtr window, IntPtr parameter);
+[DllImport("user32.dll")] public static extern bool EnumWindows(EnumWindowsProc callback, IntPtr parameter);
+[DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr window, out uint processId);
+[DllImport("user32.dll")] public static extern IntPtr SendMessageTimeout(IntPtr window, uint message, IntPtr wParam, IntPtr lParam, uint flags, uint timeout, out IntPtr result);
+'@
+    $windows = [System.Collections.Generic.List[IntPtr]]::new()
+    [void][CCBar.Window]::EnumWindows({
+        param($window, $parameter)
+        $owner = [uint32]0
+        [void][CCBar.Window]::GetWindowThreadProcessId($window, [ref]$owner)
+        if ($owner -eq $rootId) { $windows.Add($window) }
+        $true
+    }, [IntPtr]::Zero)
+    foreach ($window in $windows) {
+        $result = [IntPtr]::Zero
+        [void][CCBar.Window]::SendMessageTimeout($window, [CCBar.Window]::WM_ENDSESSION, [IntPtr]1, [IntPtr][CCBar.Window]::ENDSESSION_CLOSEAPP, [CCBar.Window]::SMTO_ABORTIFHUNG, 2000, [ref]$result)
+    }
+    [void]$main.WaitForExit(15000)
 }
 $processes = @($owned | ForEach-Object { Get-Process -Id $_ -ErrorAction SilentlyContinue })
 $closing = @(foreach ($process in $processes) {
