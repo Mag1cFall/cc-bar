@@ -3,16 +3,17 @@ import { CartesianGrid, Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YA
 import { api } from '../bridge'
 import { Card, Empty, QueryState, Section, Segments, Select } from '../components'
 import { useApp } from '../context'
-import { dateTime, usageNames } from '../format'
+import { dateTime, timelineQuotaApp, usageNames } from '../format'
 import { useQuery } from '../hooks'
 import type { Timeline as TimelineModel } from '../models'
 
 export default function Timeline({ service, active = true }: { service: number | null; active?: boolean }) {
   const { tr, revision, snapshot } = useApp()
   const [limitKind, setLimitKind] = useState('0')
-  const supportsQuota = service === null || service <= 2
+  const quotaApp = timelineQuotaApp(service)
+  const supportsQuota = quotaApp !== undefined
   const request = {
-    app: service === null || !supportsQuota ? null : service === 2 ? 3 : service,
+    app: quotaApp ?? null,
     limitKind: Number(limitKind),
   }
   const quotaRevision = [

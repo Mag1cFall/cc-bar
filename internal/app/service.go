@@ -429,6 +429,20 @@ func cacheMatches(cached cachedProvider, credential *model.Credential) bool {
 	return credential.Source != "" && cached.Source == credential.Source && token != "" && cached.Token == token
 }
 
+// inheritEmail 在同一账号的凭据缺少邮箱时沿用内存状态或磁盘缓存中的已知邮箱
+func inheritEmail(credential, previous *model.Credential, cached cachedProvider) {
+	if credential == nil || credential.Email != "" {
+		return
+	}
+	if previous != nil && previous.Email != "" && sameAccount(previous, credential) {
+		credential.Email = previous.Email
+		return
+	}
+	if cached.Email != "" && cacheMatches(cached, credential) {
+		credential.Email = cached.Email
+	}
+}
+
 // discoverProvider 仅执行本地凭据探测以便未启用服务也能显示连接状态
 func (service *Service) discoverProvider(app model.QuotaApp, settings model.Settings) {
 	credential, err := providers.Discover(app, settings)
@@ -473,24 +487,19 @@ func (service *Service) refreshProvider(app model.QuotaApp, settings model.Setti
 		state.Error = ""
 		delete(service.backoff, app)
 	}
+	cached := service.cache.Providers[app]
+	matchedCache := cacheMatches(cached, credential)
 	if credential != nil {
+		inheritEmail(credential, previousAccount, cached)
 		published := *credential
-		if published.Email == "" && sameAccount(previousAccount, credential) && previousAccount != nil {
-			published.Email = previousAccount.Email
-		}
 		state.Account = &published
 		state.Source = credential.Source
 	} else {
 		state.Account = nil
 		state.Source = ""
 	}
-	if cached := service.cache.Providers[app]; cacheMatches(cached, credential) {
-		if state.Snapshot == nil {
-			state.Snapshot = cached.Snapshot
-		}
-		if state.Account != nil && state.Account.Email == "" && cached.Email != "" {
-			state.Account.Email = cached.Email
-		}
+	if matchedCache && state.Snapshot == nil {
+		state.Snapshot = cached.Snapshot
 	}
 	service.states[app] = state
 	if credential == nil {

@@ -197,3 +197,91 @@ func TestFlushSkipsCleanAndMarksCleanupDirty(t *testing.T) {
 		t.Fatalf("跨日清理过期采样未标脏落盘: %+v", reloaded.Keys())
 	}
 }
+
+// TestAntigravityCycles 验证 Antigravity 额度采样按 UsageAntigravity 记录周期
+func TestAntigravityCycles(t *testing.T) {
+	dir := t.TempDir()
+	store, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	at := time.Date(2026, 11, 25, 12, 0, 0, 0, time.UTC)
+	reset := at.Add(3 * time.Hour)
+	seconds := 18000
+	snap := model.QuotaSnapshot{
+		App: model.Antigravity,
+		PrimaryLimit: &model.QuotaLimit{
+			ID: "gemini-5h", Kind: model.FiveHour, Window: model.QuotaWindow{UsedPercent: 35, ResetsAt: &reset, WindowSeconds: &seconds},
+		},
+	}
+	if err = store.Record("antigravity:primary:test", model.Antigravity, snap, "api", at); err != nil {
+		t.Fatal(err)
+	}
+	if err = store.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	reloaded, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cycles := reloaded.Cycles()
+	if len(cycles.Records) != 1 || cycles.Records[0].App != model.UsageAntigravity || cycles.Records[0].LatestUsedPercent != 35 {
+		t.Fatalf("Antigravity 周期记录错误: %+v", cycles.Records)
+	}
+}
+
+// TestAntigravityLimitIDIsolation 验证不同 LimitID 回退采样不会互相合并或触发误判重置
+func TestAntigravityLimitIDIsolation(t *testing.T) {
+	store, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	at := time.Date(2026, 11, 25, 12, 0, 0, 0, time.UTC)
+	resetGemini := at.Add(3 * time.Hour)
+	resetClaude := resetGemini.Add(15 * time.Second)
+	seconds := 18000
+
+	geminiSnap := model.QuotaSnapshot{
+		App: model.Antigravity,
+		PrimaryLimit: &model.QuotaLimit{
+			ID: "gemini-5h", Kind: model.FiveHour, Window: model.QuotaWindow{UsedPercent: 80, ResetsAt: &resetGemini, WindowSeconds: &seconds},
+		},
+	}
+	if err = store.Record("antigravity:primary:iso", model.Antigravity, geminiSnap, "api", at); err != nil {
+		t.Fatal(err)
+	}
+
+	// 紧随其后发生主额度回退到 claude-5h，重置时间仅差 15 秒且利用率骤降
+	claudeSnap := model.QuotaSnapshot{
+		App: model.Antigravity,
+		PrimaryLimit: &model.QuotaLimit{
+			ID: "claude-5h", Kind: model.FiveHour, Window: model.QuotaWindow{UsedPercent: 15, ResetsAt: &resetClaude, WindowSeconds: &seconds},
+		},
+	}
+	if err = store.Record("antigravity:primary:iso", model.Antigravity, claudeSnap, "api", at.Add(time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+
+	records := store.Cycles().Records
+	if len(records) != 2 {
+		t.Fatalf("不同 LimitID 不应合并为同一周期: %+v", records)
+	}
+	byLimit := map[string]CycleRecord{}
+	for _, rec := range records {
+		byLimit[rec.LimitID] = rec
+	}
+	gem, okGem := byLimit["gemini-5h"]
+	cla, okCla := byLimit["claude-5h"]
+	if !okGem || !okCla {
+		t.Fatalf("缺少独立周期记录: %+v", records)
+	}
+	if gem.LatestUsedPercent != 80 || gem.ExtraResets() != 0 {
+		t.Fatalf("gemini-5h 周期被污染或误判重置: %+v", gem)
+	}
+	if cla.LatestUsedPercent != 15 || cla.ExtraResets() != 0 {
+		t.Fatalf("claude-5h 周期状态错误: %+v", cla)
+	}
+	if !gem.EndAt.Equal(resetGemini) {
+		t.Fatalf("不同 LimitID 新建周期不应截断旧周期结束时间: got=%v want=%v", gem.EndAt, resetGemini)
+	}
+}

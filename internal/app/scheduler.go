@@ -130,11 +130,18 @@ var ignoredWatchDirs = map[string]bool{
 // isRelevantLogEvent 仅对日志或数据库源文件事件触发后台增量扫描
 func isRelevantLogEvent(path string) bool {
 	lower := strings.ToLower(filepath.Base(path))
-	return strings.HasSuffix(lower, ".jsonl") ||
+	if strings.HasSuffix(lower, ".jsonl") ||
 		strings.HasSuffix(lower, ".zstd") ||
 		lower == "opencode.db" ||
 		lower == "opencode.db-wal" ||
-		lower == "opencode.db-shm"
+		lower == "opencode.db-shm" {
+		return true
+	}
+	if (strings.HasSuffix(lower, ".db") || strings.HasSuffix(lower, ".db-wal")) &&
+		strings.EqualFold(filepath.Base(filepath.Dir(path)), "conversations") {
+		return true
+	}
+	return false
 }
 
 func (service *Service) watchLogs() {
@@ -155,6 +162,7 @@ func (service *Service) watchLogs() {
 	for _, app := range []model.UsageApp{model.UsagePi, model.UsageOmp} {
 		roots = append(roots, usage.SessionRoots(service.home, app)...)
 	}
+	roots = append(roots, usage.AntigravityRoots(service.home)...)
 	watchDirectory := func(root string) {
 		parent := root
 		for {

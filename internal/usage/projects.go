@@ -13,11 +13,14 @@ import (
 	"strings"
 )
 
-// applyTitles 按源文件变更增量补齐会话标题和项目位置
-func (store *Store) applyTitles(ctx context.Context, known map[string]fileStamp, force bool) (bool, error) {
-	sources := []struct{ path, prefix, key, title, project string }{
-		{filepath.Join(store.home, ".codex", "session_index.jsonl"), "codex:", "id", "thread_name", ""},
-		{filepath.Join(store.home, ".claude", "history.jsonl"), "claude:", "sessionId", "display", "project"},
+// applyTitles 按源文件变更或新会话到达增量补齐会话标题和项目位置
+func (store *Store) applyTitles(ctx context.Context, known map[string]fileStamp, force, codexDirty, claudeDirty bool) (bool, error) {
+	sources := []struct {
+		path, prefix, key, title, project string
+		dirty                             bool
+	}{
+		{filepath.Join(store.home, ".codex", "session_index.jsonl"), "codex:", "id", "thread_name", "", codexDirty},
+		{filepath.Join(store.home, ".claude", "history.jsonl"), "claude:", "sessionId", "display", "project", claudeDirty},
 	}
 	type pendingSource struct {
 		path, prefix, key, title, project string
@@ -32,7 +35,7 @@ func (store *Store) applyTitles(ctx context.Context, known map[string]fileStamp,
 		if err != nil {
 			return false, err
 		}
-		if !force {
+		if !force && !entry.dirty {
 			if stamp, ok := known[entry.path]; ok && stamp.length == info.Size() && stamp.modified == fileTicks(info) {
 				continue
 			}

@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -153,8 +154,12 @@ func (store *Store) dictSnapshot() (map[int64]string, map[int64]string) {
 	return maps.Clone(store.modelNames), maps.Clone(store.speedNames)
 }
 
-// resolveDict 解析模型与档位名称并在内存快照缺失时从数据库回填
-func (store *Store) resolveDict(ctx context.Context, modelID, speedID int64, modelNames, speedNames map[int64]string) (string, string) {
+type rowQuerier interface {
+	QueryRowContext(context.Context, string, ...any) *sql.Row
+}
+
+// resolveDict 在指定查询器上解析模型与档位名称并在内存快照缺失时回填
+func (store *Store) resolveDict(ctx context.Context, q rowQuerier, modelID, speedID int64, modelNames, speedNames map[int64]string) (string, string) {
 	modelName, okModel := modelNames[modelID]
 	speedName, okSpeed := speedNames[speedID]
 	if okModel && okSpeed {
@@ -178,11 +183,11 @@ func (store *Store) resolveDict(ctx context.Context, modelID, speedID int64, mod
 		return modelName, speedName
 	}
 	var loadedModel, loadedSpeed bool
-	if !okModel && store.db.QueryRowContext(ctx, "SELECT name FROM usage_model WHERE id=?", modelID).Scan(&modelName) == nil {
+	if !okModel && q.QueryRowContext(ctx, "SELECT name FROM usage_model WHERE id=?", modelID).Scan(&modelName) == nil {
 		loadedModel = true
 		modelNames[modelID] = modelName
 	}
-	if !okSpeed && store.db.QueryRowContext(ctx, "SELECT name FROM usage_speed WHERE id=?", speedID).Scan(&speedName) == nil {
+	if !okSpeed && q.QueryRowContext(ctx, "SELECT name FROM usage_speed WHERE id=?", speedID).Scan(&speedName) == nil {
 		loadedSpeed = true
 		speedNames[speedID] = speedName
 	}
@@ -608,13 +613,21 @@ func splitRollupRange(startMs, endMs int64) (left [2]int64, buckets [2]int64, ri
 	return [2]int64{startMs, first * rollupBucketMs}, [2]int64{first, last}, [2]int64{last * rollupBucketMs, endMs}
 }
 
-// Totals 优先从15分钟预聚合桶与索引边缘精确汇总半开时间区间
+// Totals 在单一只读快照内汇总半开时间区间的预聚合桶与索引边缘
 func (store *Store) Totals(ctx context.Context, app *model.UsageApp, from, to time.Time) (model.UsageTotals, error) {
 	var total model.UsageTotals
 	left, buckets, right := splitRollupRange(from.UnixMilli(), to.UnixMilli())
+	if buckets[0] >= buckets[1] && left[0] >= left[1] && right[0] >= right[1] {
+		return total, nil
+	}
+	tx, err := store.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		return total, err
+	}
+	defer tx.Rollback()
 	rawFilter := rawAppFilter("", app, nil)
 	if buckets[0] < buckets[1] {
-		part, err := scanTotals(store.db.QueryRowContext(ctx, "SELECT "+rollupTotalsSQL+" FROM usage_rollup WHERE bucket>=? AND bucket<?"+sourceFilter("", app, nil), buckets[0], buckets[1]))
+		part, err := scanTotals(tx.QueryRowContext(ctx, "SELECT "+rollupTotalsSQL+" FROM usage_rollup WHERE bucket>=? AND bucket<?"+sourceFilter("", app, nil), buckets[0], buckets[1]))
 		if err != nil {
 			return total, err
 		}
@@ -622,7 +635,7 @@ func (store *Store) Totals(ctx context.Context, app *model.UsageApp, from, to ti
 	}
 	for _, edge := range [2][2]int64{left, right} {
 		if edge[0] < edge[1] {
-			part, err := scanTotals(store.db.QueryRowContext(ctx, "SELECT "+totalsSQL+" FROM usage WHERE time>=? AND time<?"+rawFilter, edge[0], edge[1]))
+			part, err := scanTotals(tx.QueryRowContext(ctx, "SELECT "+totalsSQL+" FROM usage WHERE time>=? AND time<?"+rawFilter, edge[0], edge[1]))
 			if err != nil {
 				return total, err
 			}
@@ -638,8 +651,54 @@ type Interval struct {
 	To   time.Time
 }
 
-// TotalsInIntervals 在SQL内结合预聚合桶与原始边缘汇总同一账号的实际使用区间
+// matchModelFamily 判断模型名是否归属于指定的 Antigravity 额度模型族
+func matchModelFamily(name, family string) bool {
+	if family == "" {
+		return true
+	}
+	norm := NormalizeModel(name)
+	isArgon := strings.Contains(norm, "argon")
+	isGemini := !isArgon && strings.HasPrefix(norm, "gemini")
+	switch family {
+	case "argon":
+		return isArgon
+	case "gemini":
+		return isGemini
+	case "claude":
+		return !isArgon && !isGemini
+	default:
+		return true
+	}
+}
+
+// familyModelIDs 在指定只读事务快照中收集属于目标模型族的模型编号
+func familyModelIDs(ctx context.Context, tx *sql.Tx, family string) ([]string, error) {
+	rows, err := tx.QueryContext(ctx, "SELECT id,name FROM usage_model")
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	ids := []string{}
+	for rows.Next() {
+		var id int64
+		var name string
+		if err = rows.Scan(&id, &name); err != nil {
+			return nil, err
+		}
+		if matchModelFamily(name, family) {
+			ids = append(ids, strconv.FormatInt(id, 10))
+		}
+	}
+	return ids, rows.Err()
+}
+
+// TotalsInIntervals 在单一只读快照内汇总同一账号的实际使用区间
 func (store *Store) TotalsInIntervals(ctx context.Context, app model.UsageApp, intervals []Interval) (model.UsageTotals, error) {
+	return store.TotalsInIntervalsForFamily(ctx, app, "", intervals)
+}
+
+// TotalsInIntervalsForFamily 在单一只读快照内按可选模型族汇总使用区间
+func (store *Store) TotalsInIntervalsForFamily(ctx context.Context, app model.UsageApp, family string, intervals []Interval) (model.UsageTotals, error) {
 	var total model.UsageTotals
 	bucketClauses := []string{}
 	bucketArgs := []any{app}
@@ -663,15 +722,34 @@ func (store *Store) TotalsInIntervals(ctx context.Context, app model.UsageApp, i
 			rawArgs = append(rawArgs, right[0], right[1])
 		}
 	}
+	if len(bucketClauses) == 0 && len(rawClauses) == 0 {
+		return total, nil
+	}
+	tx, err := store.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		return total, err
+	}
+	defer tx.Rollback()
+	modelFilter := ""
+	if family != "" {
+		ids, idErr := familyModelIDs(ctx, tx, family)
+		if idErr != nil {
+			return total, idErr
+		}
+		if len(ids) == 0 {
+			return total, nil
+		}
+		modelFilter = " AND model_id IN (" + strings.Join(ids, ",") + ")"
+	}
 	if len(bucketClauses) > 0 {
-		part, err := scanTotals(store.db.QueryRowContext(ctx, "SELECT "+rollupTotalsSQL+" FROM usage_rollup WHERE app=? AND ("+strings.Join(bucketClauses, " OR ")+")", bucketArgs...))
+		part, err := scanTotals(tx.QueryRowContext(ctx, "SELECT "+rollupTotalsSQL+" FROM usage_rollup WHERE app=?"+modelFilter+" AND ("+strings.Join(bucketClauses, " OR ")+")", bucketArgs...))
 		if err != nil {
 			return total, err
 		}
 		total.Add(part)
 	}
 	if len(rawClauses) > 0 {
-		part, err := scanTotals(store.db.QueryRowContext(ctx, "SELECT "+totalsSQL+" FROM usage WHERE app=? AND ("+strings.Join(rawClauses, " OR ")+")", rawArgs...))
+		part, err := scanTotals(tx.QueryRowContext(ctx, "SELECT "+totalsSQL+" FROM usage WHERE app=?"+modelFilter+" AND ("+strings.Join(rawClauses, " OR ")+")", rawArgs...))
 		if err != nil {
 			return total, err
 		}
@@ -719,33 +797,41 @@ func (store *Store) RefreshPricingIfNeeded(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	modelNames, speedNames := store.dictSnapshot()
-	now := time.Now()
-	missing := []string{}
-	canReprice := false
+	type rawCombo struct {
+		app     model.UsageApp
+		speedID int64
+		modelID int64
+	}
+	combos := []rawCombo{}
 	for rows.Next() {
-		var app model.UsageApp
-		var speedID, modelID int64
-		if err = rows.Scan(&app, &speedID, &modelID); err != nil {
+		var c rawCombo
+		if err = rows.Scan(&c.app, &c.speedID, &c.modelID); err != nil {
 			rows.Close()
 			return err
 		}
-		name, speed := store.resolveDict(ctx, modelID, speedID, modelNames, speedNames)
-		if speed == "unknown" || name == "codex-auto-review" {
-			continue
-		}
-		probeShort := model.UsageRow{App: app, Model: name, Speed: speed, Time: now, Input: 1}
-		probeLong := model.UsageRow{App: app, Model: name, Speed: speed, Time: now, Input: 300000}
-		if store.pricing.Cost(probeShort) != nil || store.pricing.Cost(probeLong) != nil {
-			canReprice = true
-			continue
-		}
-		missing = append(missing, fmt.Sprintf("%d|%s|%s", app, speed, name))
+		combos = append(combos, c)
 	}
 	err = rows.Err()
 	rows.Close()
 	if err != nil {
 		return err
+	}
+	modelNames, speedNames := store.dictSnapshot()
+	now := time.Now()
+	missing := []string{}
+	canReprice := false
+	for _, c := range combos {
+		name, speed := store.resolveDict(ctx, store.db, c.modelID, c.speedID, modelNames, speedNames)
+		if speed == "unknown" || name == "codex-auto-review" {
+			continue
+		}
+		probeShort := model.UsageRow{App: c.app, Model: name, Speed: speed, Time: now, Input: 1}
+		probeLong := model.UsageRow{App: c.app, Model: name, Speed: speed, Time: now, Input: 300000}
+		if store.pricing.Cost(probeShort) != nil || store.pricing.Cost(probeLong) != nil {
+			canReprice = true
+			continue
+		}
+		missing = append(missing, fmt.Sprintf("%d|%s|%s", c.app, speed, name))
 	}
 	force := false
 	toRecord := []string{}

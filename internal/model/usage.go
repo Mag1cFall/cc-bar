@@ -184,8 +184,8 @@ type UsageStatus struct {
 
 // UsageName 返回统计服务的显示名称
 func UsageName(app UsageApp) string {
-	names := [...]string{"Codex", "Claude Code", "Cursor", "Pi", "OpenCode", "DSH", "Oh My Pi"}
-	if app < UsageCodex || app > UsageOmp {
+	names := [...]string{"Codex", "Claude Code", "Cursor", "Pi", "OpenCode", "DSH", "Oh My Pi", "Antigravity"}
+	if app < UsageCodex || app > UsageAntigravity {
 		return "Unknown"
 	}
 	return names[app]

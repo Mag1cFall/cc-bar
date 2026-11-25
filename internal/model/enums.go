@@ -52,7 +52,7 @@ func (app *QuotaApp) UnmarshalText(text []byte) error {
 
 // UnmarshalText 读取设置中持久化的用量来源名称或枚举值
 func (app *UsageApp) UnmarshalText(text []byte) error {
-	value, err := enumValue(string(text), []string{"Codex", "Claude", "Cursor", "Pi", "Opencode", "Dsh", "Omp"})
+	value, err := enumValue(string(text), []string{"Codex", "Claude", "Cursor", "Pi", "Opencode", "Dsh", "Omp", "Antigravity"})
 	if err == nil {
 		*app = UsageApp(value)
 	}

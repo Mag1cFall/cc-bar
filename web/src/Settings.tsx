@@ -336,7 +336,8 @@ function ServiceRow({ provider, action }: { provider: Provider; action?: () => v
   const settings = snapshot.settings,
     display = settings.providers[String(provider.app)]
   if (!display) return null
-  const usage = provider.app === 3 ? 2 : provider.app <= 1 ? provider.app : undefined
+  const usage = provider.app === 3 ? 2 : provider.app === 2 ? 7 : provider.app <= 1 ? provider.app : undefined
+  const independentUsage = usage !== undefined && provider.app !== 3
   const update = (value: Partial<typeof display>) => {
     void save({ ...settings, providers: { ...settings.providers, [provider.app]: { ...display, ...value } } })
   }
@@ -396,29 +397,29 @@ function ServiceRow({ provider, action }: { provider: Provider; action?: () => v
           onCheckedChange={(value) => update({ enabled: value })}
         />
       </div>
-      {display.enabled && (
+      {(display.enabled || independentUsage) && (
         <div className="destinations">
           <span>{tr('Display', '展示位置')}</span>
           <label>
             <input
               type="checkbox"
-              checked={display.menuBar}
-              disabled={busy}
+              checked={display.enabled && display.menuBar}
+              disabled={busy || !display.enabled}
               onChange={(event) => update({ menuBar: event.target.checked })}
             />
             {tr('Tray', '通知区域')}
           </label>
           <label
             title={
-              !settings.floatingEnabled
+              display.enabled && !settings.floatingEnabled
                 ? tr('Enable the floating HUD in Appearance & Display.', '在「外观与显示」开启悬浮窗')
                 : undefined
             }
           >
             <input
               type="checkbox"
-              checked={display.floatingHud}
-              disabled={busy || !settings.floatingEnabled}
+              checked={display.enabled && display.floatingHud}
+              disabled={busy || !display.enabled || !settings.floatingEnabled}
               onChange={(event) => update({ floatingHud: event.target.checked })}
             />
             {tr('Floating HUD', '悬浮窗')}

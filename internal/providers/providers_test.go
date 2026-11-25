@@ -632,3 +632,44 @@ func TestFetchAntigravityHostFallbackAndDaemon(t *testing.T) {
 		t.Fatalf("应跳过失联的最新 daemon 文件并命中存活 daemon: err=%v root=%+v", err, daemonRoot)
 	}
 }
+
+// TestParseAntigravityGeminiOnlyModelsNoDuplicate 验证仅含 Gemini 的 models 兜底不会重复生成主副限额与 Gemini 窗口
+func TestParseAntigravityGeminiOnlyModelsNoDuplicate(t *testing.T) {
+	reset4h := time.Now().Add(4 * time.Hour).UTC().Format(time.RFC3339)
+	reset5d := time.Now().Add(5 * 24 * time.Hour).UTC().Format(time.RFC3339)
+	bothRoot, err := DecodeObject([]byte(`{
+		"models": {
+			"gemini-3.8-flash-high": {"quotaInfo": {"remainingFraction": 0.9, "resetTime": "` + reset4h + `"}},
+			"gemini-3.8-pro-high": {"quotaInfo": {"remainingFraction": 0.65, "resetTime": "` + reset5d + `"}}
+		}
+	}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	bothSnap := ParseAntigravity(bothRoot)
+	if bothSnap.PrimaryLimit == nil || math.Abs(bothSnap.PrimaryLimit.Window.UsedPercent-10) > 0.01 {
+		t.Fatalf("Gemini 5H 应升格为主限额: %+v", bothSnap.PrimaryLimit)
+	}
+	if bothSnap.SecondaryLimit == nil || math.Abs(bothSnap.SecondaryLimit.Window.UsedPercent-35) > 0.01 {
+		t.Fatalf("Gemini 周额度应升格为副限额: %+v", bothSnap.SecondaryLimit)
+	}
+	if bothSnap.GeminiWindow != nil || bothSnap.GeminiWeekly != nil {
+		t.Fatalf("升格后的 Gemini 窗口不应重复保留: window=%+v weekly=%+v", bothSnap.GeminiWindow, bothSnap.GeminiWeekly)
+	}
+
+	weeklyOnlyRoot, err := DecodeObject([]byte(`{
+		"models": {
+			"gemini-3.8-pro-high": {"quotaInfo": {"remainingFraction": 0.6, "resetTime": "` + reset5d + `"}}
+		}
+	}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	weeklyOnlySnap := ParseAntigravity(weeklyOnlyRoot)
+	if weeklyOnlySnap.PrimaryLimit == nil || math.Abs(weeklyOnlySnap.PrimaryLimit.Window.UsedPercent-40) > 0.01 {
+		t.Fatalf("仅含 Gemini 周额度时应升格为主限额: %+v", weeklyOnlySnap.PrimaryLimit)
+	}
+	if weeklyOnlySnap.SecondaryLimit != nil || weeklyOnlySnap.GeminiWindow != nil || weeklyOnlySnap.GeminiWeekly != nil {
+		t.Fatalf("仅含 Gemini 周额度时不应生成重复窗口: secondary=%+v window=%+v weekly=%+v", weeklyOnlySnap.SecondaryLimit, weeklyOnlySnap.GeminiWindow, weeklyOnlySnap.GeminiWeekly)
+	}
+}

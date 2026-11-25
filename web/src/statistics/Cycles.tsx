@@ -33,7 +33,7 @@ export default function Cycles({ service, active = true }: { service: number | n
     () => records.filter((record) => record.isCurrent && record.isActiveAccount),
     [records],
   )
-  const apps = useMemo(() => [0, 1].filter((app) => service === null || service === app), [service])
+  const apps = useMemo(() => [0, 1, 7].filter((app) => service === null || service === app), [service])
   const historical = useMemo(
     () =>
       records
@@ -129,7 +129,7 @@ export default function Cycles({ service, active = true }: { service: number | n
 
 function CycleCard({ record, app, kind }: { record?: Cycle; app: number; kind: number }) {
   const { tr, english, snapshot } = useApp()
-  const provider = snapshot.providers.find((value) => value.app === app)
+  const provider = snapshot.providers.find((value) => value.app === (app === 7 ? 2 : app))
   const projected = record
   const confidence = projected?.forecastConfidence
   const caption =

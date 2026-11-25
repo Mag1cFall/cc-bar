@@ -4,7 +4,16 @@ import { ArrowRightLeft, ChartColumn, LogOut, RefreshCw, Settings2 } from 'lucid
 import { api } from './bridge'
 import { ActionMenu, Button, Empty, Logo, MenuItem, Progress, Quota, Status } from './components'
 import { useApp } from './context'
-import { dateBounds, dateTime, localDate, money, quotaKeys, quotaTone, remaining } from './format'
+import {
+  dateBounds,
+  dateTime,
+  localDate,
+  money,
+  popoverProviders,
+  quotaKeys,
+  quotaTone,
+  remaining,
+} from './format'
 import { usePageVisible, useQuery } from './hooks'
 import type { Provider } from './models'
 
@@ -14,10 +23,11 @@ export default function MiniWindows({ mode }: { mode: 'popover' | 'hud' }) {
   const visible = usePageVisible()
   const surface = useRef<HTMLDivElement>(null)
   const [clock, setClock] = useState(Date.now)
-  const providers = snapshot.providers.filter((provider) => {
+  const enabledProviders = snapshot.providers.filter((provider) => {
     const display = snapshot.settings.providers[String(provider.app)]
     return display?.enabled && (mode !== 'hud' || display.floatingHud)
   })
+  const providers = mode === 'popover' ? popoverProviders(enabledProviders) : enabledProviders
   const now = new Date(clock)
   const todayBounds = dateBounds('today', '', '', now)
   const weekBounds = dateBounds('week', '', '', now)
@@ -27,16 +37,12 @@ export default function MiniWindows({ mode }: { mode: 'popover' | 'hud' }) {
     mode === 'popover' && visible,
   )
   useEffect(() => {
-    const syncOnShow = () => {
-      if (!document.hidden) setClock(Date.now())
-    }
-    document.addEventListener('visibilitychange', syncOnShow)
-    if (!visible) {
-      return () => document.removeEventListener('visibilitychange', syncOnShow)
-    }
-    const timer = window.setInterval(() => setClock(Date.now()), 60_000)
+    if (!visible) return
+    const sync = () => setClock(Date.now())
+    const immediate = window.setTimeout(sync, 0)
+    const timer = window.setInterval(sync, 60_000)
     return () => {
-      document.removeEventListener('visibilitychange', syncOnShow)
+      window.clearTimeout(immediate)
       window.clearInterval(timer)
     }
   }, [visible])
@@ -184,7 +190,16 @@ export default function MiniWindows({ mode }: { mode: 'popover' | 'hud' }) {
         </div>
       </header>
       {providers.map((provider) => {
-        const usageApp = provider.app === 0 ? 0 : provider.app === 1 ? 1 : provider.app === 3 ? 2 : null
+        const usageApp =
+          provider.app === 0
+            ? 0
+            : provider.app === 1
+              ? 1
+              : provider.app === 2
+                ? 7
+                : provider.app === 3
+                  ? 2
+                  : null
         return (
           <PopoverService
             key={provider.app}
@@ -344,7 +359,7 @@ function PopoverService({ provider, today, week }: { provider: Provider; today?:
         </p>
       )}
       {provider.error && <p className="error-text">{provider.error}</p>}
-      {(provider.app <= 1 || provider.app === 3) && (
+      {provider.app <= 3 && (
         <div className="popover-costs">
           <span>
             {tr('Today', '今天')} <strong>{today === undefined ? '—' : money(today)}</strong>

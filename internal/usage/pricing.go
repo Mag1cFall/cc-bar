@@ -23,7 +23,7 @@ var builtin = map[string]Price{
 	"claude-fable-5.1": {10, 50, .25, 12.5}, "claude-fable-5-1": {10, 50, .25, 12.5}, "claude-fable-5": {10, 50, 1, 12.5},
 	"claude-opus-5.5": {4, 20, .2, 5}, "claude-opus-5-5": {4, 20, .2, 5}, "claude-opus-5": {5, 25, .5, 6.25},
 	"claude-opus-4-8": {5, 25, .5, 6.25}, "claude-opus-4-7": {5, 25, .5, 6.25}, "claude-opus-4-6": {5, 25, .5, 6.25}, "claude-opus-4-5": {5, 25, .5, 6.25},
-	"claude-opus-4-1": {15, 75, 1.5, 18.75}, "claude-opus-4": {15, 75, 1.5, 18.75}, "claude-sonnet-5": {2, 10, .2, 2.5},
+	"claude-opus-4-1": {15, 75, 1.5, 18.75}, "claude-opus-4": {15, 75, 1.5, 18.75}, "claude-sonnet-5.5": {2, 10, .1, 2.5}, "claude-sonnet-5-5": {2, 10, .1, 2.5}, "claude-sonnet-5": {2, 10, .2, 2.5},
 	"claude-sonnet-4-7": {3, 15, .3, 3.75}, "claude-sonnet-4-6": {3, 15, .3, 3.75}, "claude-sonnet-4-5": {3, 15, .3, 3.75}, "claude-sonnet-4": {3, 15, .3, 3.75},
 	"claude-haiku-4-5": {1, 5, .1, 1.25}, "claude-haiku-4": {.8, 4, .08, 1}, "claude-3-5-sonnet": {3, 15, .3, 3.75}, "claude-3-5-haiku": {.8, 4, .08, 1}, "claude-3-opus": {15, 75, 1.5, 18.75},
 	"gpt-6-astra": {10, 50, 1, 12.5}, "gpt-6-sol": {2, 10, .2, 2.5}, "gpt-6-luna": {.1, .5, .01, .125},
@@ -33,7 +33,11 @@ var builtin = map[string]Price{
 	"gpt-5.3": {1.25, 10, .125, 0}, "gpt-5.3-codex": {1.25, 10, .125, 0}, "gpt-5.2": {1.25, 10, .125, 0}, "gpt-5.2-codex": {1.25, 10, .125, 0}, "gpt-5.1": {1.25, 10, .125, 0},
 	"gpt-5": {1.25, 10, .125, 0}, "gpt-5-codex": {1.25, 10, .125, 0}, "gpt-5-mini": {.25, 2, .025, 0}, "gpt-5-nano": {.05, .4, .005, 0}, "codex-mini-latest": {1.5, 6, .375, 0},
 	"gpt-4o": {2.5, 10, 1.25, 0}, "gpt-4o-mini": {.15, .6, .075, 0}, "o3": {2, 8, 1, 0}, "o1": {15, 60, 7.5, 0}, "o1-mini": {1.1, 4.4, .55, 0}, "o3-mini": {1.1, 4.4, .55, 0}, "o4-mini": {1.1, 4.4, .55, 0},
-	"composer-2.5": {3, 15, .3, 3.75}, "cursor-composer-2-5": {3, 15, .3, 3.75}, "grok-4-6": {2, 6, .5, 0}, "grok-4-5": {2, 6, .5, 0}, "gemini-3.1-pro": {1.25, 5, .3125, 0}, "gemini-3.7-flash": {.1, .4, .025, 0},
+	"composer-2.5": {3, 15, .3, 3.75}, "cursor-composer-2-5": {3, 15, .3, 3.75}, "grok-4-6": {2, 6, .5, 0}, "grok-4-5": {2, 6, .5, 0}, "gpt-oss-120b": {.15, .6, .075, 0},
+	"gemini-4-neon": {3, 15, .15, 0}, "gemini-4-carbon": {2, 10, .1, 0}, "gemini-4-argon": {2, 10, .1, 0}, "gemini-4-argon-build": {2, 10, .1, 0}, "gemini-4-hydrogen": {1.5, 7.5, .075, 0},
+	"gemini-3.8-flash": {.75, 3.75, .075, 0}, "gemini-3.7-flash": {.1, .4, .025, 0}, "gemini-3.5-flash-lite": {.1, .4, .01, 0}, "gemini-3.1-flash-lite": {.1, .4, .01, 0},
+	"gemini-3.1-pro": {1.25, 5, .3125, 0}, "gemini-3-pro": {2, 12, .2, 0}, "gemini-3-flash": {.5, 3, .05, 0},
+	"gemini-2.5-pro": {1.25, 10, .125, 0}, "gemini-2.5-flash": {.3, 2.5, .03, 0}, "gemini-2.5-flash-lite": {.1, .4, .01, 0},
 	"deepseek-v4-pro": {.435, .87, .003625, 0}, "deepseek-flash": {.14, .28, .0028, 0}, "deepseek-v4.1-flash": {.14, .28, .0028, 0}, "deepseek-v4-flash": {.14, .28, .0028, 0}, "deepseek-v4-flash-vision-exp": {.14, .28, .0028, 0},
 	"deepseek-v3.2": {.28, .42, .028, 0}, "deepseek-v3.1": {.55, 1.67, .055, 0}, "deepseek-v3": {.28, 1.11, .028, 0}, "deepseek-chat": {.27, 1.10, .07, 0}, "deepseek-reasoner": {.55, 2.19, .14, 0},
 }
@@ -73,12 +77,29 @@ func stripDateSuffix(name string) string {
 	return name
 }
 
+// stripVariantSuffix 循环移除 Antigravity 等来源附带的推理档位与预览后缀
+func stripVariantSuffix(name string) string {
+	for {
+		trimmed := name
+		for _, suffix := range []string{"-tiered-xhigh", "-tiered-high", "-tiered-medium", "-tiered-low", "-xhigh", "-high", "-medium", "-low", "-thinking", "-preview"} {
+			if strings.HasSuffix(trimmed, suffix) {
+				trimmed = strings.TrimSuffix(trimmed, suffix)
+				break
+			}
+		}
+		if trimmed == name {
+			return name
+		}
+		name = trimmed
+	}
+}
+
 // NormalizeModel 移除提供商前缀和版本日期以匹配价格目录
 func NormalizeModel(name string) string {
 	name = strings.ToLower(strings.TrimSpace(name))
 	for {
 		changed := false
-		for _, prefix := range []string{"openai-codex/", "openai/", "anthropic/", "deepseek/", "opencode-go/", "commandcode/", "command-code/"} {
+		for _, prefix := range []string{"openai-codex/", "openai/", "anthropic/", "deepseek/", "opencode-go/", "commandcode/", "command-code/", "google/", "google-vertex/", "gemini/"} {
 			if strings.HasPrefix(name, prefix) {
 				name = strings.TrimPrefix(name, prefix)
 				changed = true
@@ -177,7 +198,7 @@ func (pricing *Pricing) CostBreakdown(row model.UsageRow) *model.CostBreakdown {
 	if row.ReportedCosts != nil {
 		return row.ReportedCosts
 	}
-	if row.App == model.UsagePi || row.App == model.UsageOmp {
+	if row.App == model.UsagePi || row.App == model.UsageOmp || row.App == model.UsageAntigravity {
 		switch Provider(row.App, row.Model) {
 		case "OpenAI":
 			row.App = model.UsageCodex
@@ -246,6 +267,15 @@ func (pricing *Pricing) CostBreakdown(row model.UsageRow) *model.CostBreakdown {
 	default:
 		return nil
 	}
+	if !found && row.Speed == "standard" {
+		if base := stripVariantSuffix(name); base != name {
+			if p, ok := builtin[base]; ok {
+				price, found = p, true
+			} else if online, ok := pricing.rate(base, row.App, row.Speed); ok {
+				price, found = online, true
+			}
+		}
+	}
 	if !found {
 		return nil
 	}
@@ -269,7 +299,7 @@ func (pricing *Pricing) Cost(row model.UsageRow) *float64 {
 
 // BillingEquivalentMultiplier 返回账号额度的快速档位倍率
 func BillingEquivalentMultiplier(app model.UsageApp, name string) *float64 {
-	if app == model.UsagePi || app == model.UsageOmp {
+	if app == model.UsagePi || app == model.UsageOmp || app == model.UsageAntigravity {
 		switch Provider(app, name) {
 		case "OpenAI":
 			app = model.UsageCodex
@@ -338,18 +368,26 @@ func decodeCatalog(root node, lite bool) priceSource {
 		for name, raw := range root {
 			entry := object(raw)
 			provider := str(entry, "litellm_provider")
-			if strings.Contains(name, "/") || (provider != "anthropic" && provider != "openai" && provider != "deepseek") {
+			if provider != "anthropic" && provider != "openai" && provider != "deepseek" && provider != "gemini" {
+				continue
+			}
+			priority := 0
+			if provider == "gemini" && strings.HasPrefix(name, "gemini/") {
+				name = strings.TrimPrefix(name, "gemini/")
+				priority = 1
+			}
+			if strings.Contains(name, "/") {
 				continue
 			}
 			if has(entry, "input_cost_per_token") && has(entry, "output_cost_per_token") {
-				standard = append(standard, rateCandidate{name, 0, Price{number(entry, "input_cost_per_token") * 1e6, number(entry, "output_cost_per_token") * 1e6, number(entry, "cache_read_input_token_cost") * 1e6, number(entry, "cache_creation_input_token_cost") * 1e6}})
+				standard = append(standard, rateCandidate{name, priority, Price{number(entry, "input_cost_per_token") * 1e6, number(entry, "output_cost_per_token") * 1e6, number(entry, "cache_read_input_token_cost") * 1e6, number(entry, "cache_creation_input_token_cost") * 1e6}})
 			}
 			if provider == "openai" && has(entry, "input_cost_per_token_priority") && has(entry, "output_cost_per_token_priority") {
-				codex = append(codex, rateCandidate{name, 0, Price{number(entry, "input_cost_per_token_priority") * 1e6, number(entry, "output_cost_per_token_priority") * 1e6, number(entry, "cache_read_input_token_cost_priority") * 1e6, number(entry, "cache_creation_input_token_cost_priority") * 1e6}})
+				codex = append(codex, rateCandidate{name, priority, Price{number(entry, "input_cost_per_token_priority") * 1e6, number(entry, "output_cost_per_token_priority") * 1e6, number(entry, "cache_read_input_token_cost_priority") * 1e6, number(entry, "cache_creation_input_token_cost_priority") * 1e6}})
 			}
 		}
 	} else {
-		for priority, provider := range []string{"anthropic", "openai", "deepseek"} {
+		for priority, provider := range []string{"anthropic", "openai", "deepseek", "google"} {
 			for name, raw := range obj(obj(root, provider), "models") {
 				entry := object(raw)
 				cost := obj(entry, "cost")

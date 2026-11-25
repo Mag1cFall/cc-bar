@@ -16,7 +16,7 @@ import (
 // Provider 按模型前缀与来源服务归并厂商
 func Provider(app model.UsageApp, name string) string {
 	name = strings.ToLower(name)
-	if strings.HasPrefix(name, "google/") || strings.HasPrefix(name, "google-vertex/") || strings.HasPrefix(name, "gemini-") {
+	if strings.HasPrefix(name, "google/") || strings.HasPrefix(name, "google-vertex/") || strings.HasPrefix(name, "gemini/") || strings.HasPrefix(name, "gemini-") {
 		return "Google"
 	}
 	if strings.HasPrefix(name, "xai/") || strings.HasPrefix(name, "grok-") {
@@ -99,7 +99,7 @@ func sourceFilter(prefix string, app *model.UsageApp, allowed map[model.UsageApp
 		return ""
 	}
 	apps := []string{}
-	for candidate := model.UsageCodex; candidate <= model.UsageOmp; candidate++ {
+	for candidate := model.UsageCodex; candidate <= model.UsageAntigravity; candidate++ {
 		if allowed[candidate] {
 			apps = append(apps, fmt.Sprint(candidate))
 		}
@@ -115,7 +115,7 @@ func rawAppFilter(prefix string, app *model.UsageApp, allowed map[model.UsageApp
 	if filter := sourceFilter(prefix, app, allowed); filter != "" {
 		return filter
 	}
-	return " AND " + prefix + "app IN (0,1,2,3,4,5,6)"
+	return " AND " + prefix + "app IN (0,1,2,3,4,5,6,7)"
 }
 
 // PopoverCosts 单次扫描预聚合桶返回各服务今日与本周费用
@@ -129,6 +129,11 @@ func (store *Store) PopoverCosts(ctx context.Context, allowed map[model.UsageApp
 	if !start.Before(to) {
 		return todayCosts, weekCosts, nil
 	}
+	tx, err := store.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		return nil, nil, err
+	}
+	defer tx.Rollback()
 	todayMs := todayFrom.UnixMilli()
 	weekMs := weekFrom.UnixMilli()
 	addRange := func(fromMs, toMs int64, inToday, inWeek bool) error {
@@ -137,7 +142,7 @@ func (store *Store) PopoverCosts(ctx context.Context, allowed map[model.UsageApp
 		}
 		left, buckets, right := splitRollupRange(fromMs, toMs)
 		if buckets[0] < buckets[1] {
-			rows, err := store.db.QueryContext(ctx, "SELECT app,COALESCE(SUM(cost),0) FROM usage_rollup WHERE bucket>=? AND bucket<?"+sourceFilter("", nil, allowed)+" GROUP BY app", buckets[0], buckets[1])
+			rows, err := tx.QueryContext(ctx, "SELECT app,COALESCE(SUM(cost),0) FROM usage_rollup WHERE bucket>=? AND bucket<?"+sourceFilter("", nil, allowed)+" GROUP BY app", buckets[0], buckets[1])
 			if err != nil {
 				return err
 			}
@@ -166,7 +171,7 @@ func (store *Store) PopoverCosts(ctx context.Context, allowed map[model.UsageApp
 			if edge[0] >= edge[1] {
 				continue
 			}
-			rows, err := store.db.QueryContext(ctx, "SELECT app,COALESCE(SUM(cost),0) FROM usage WHERE time>=? AND time<?"+rawFilter+" GROUP BY app", edge[0], edge[1])
+			rows, err := tx.QueryContext(ctx, "SELECT app,COALESCE(SUM(cost),0) FROM usage WHERE time>=? AND time<?"+rawFilter+" GROUP BY app", edge[0], edge[1])
 			if err != nil {
 				return err
 			}
@@ -361,7 +366,7 @@ func (store *Store) Overview(ctx context.Context, query model.UsageQuery) (model
 					rows.Close()
 					return result, err
 				}
-				modelName, speedName := store.resolveDict(ctx, modelID, speedID, modelNames, speedNames)
+				modelName, speedName := store.resolveDict(ctx, tx, modelID, speedID, modelNames, speedNames)
 				applyRow(app, modelName, speedName, dayForBucket(bucket), seg.period, totals)
 			}
 			err = rows.Err()
@@ -388,7 +393,7 @@ func (store *Store) Overview(ctx context.Context, query model.UsageQuery) (model
 					rows.Close()
 					return result, err
 				}
-				modelName, speedName := store.resolveDict(ctx, modelID, speedID, modelNames, speedNames)
+				modelName, speedName := store.resolveDict(ctx, tx, modelID, speedID, modelNames, speedNames)
 				applyRow(app, modelName, speedName, bucketStart(time.UnixMilli(atMs), "day"), seg.period, totals)
 			}
 			err = rows.Err()
@@ -655,11 +660,16 @@ func conversationLess(left, right model.ConversationSummary, order string) bool 
 // Detail 返回整个对话的原始请求及精确价格拆分
 func (store *Store) Detail(ctx context.Context, id string) (model.ConversationDetail, error) {
 	result := model.ConversationDetail{Events: []model.UsageRow{}, Models: []model.UsageGroup{}}
+	tx, err := store.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		return result, err
+	}
+	defer tx.Rollback()
 	store.dictMu.RLock()
 	convID, ok := store.convs[id]
 	store.dictMu.RUnlock()
 	if !ok {
-		if err := store.db.QueryRowContext(ctx, "SELECT id FROM usage_conv WHERE name=?", id).Scan(&convID); err != nil {
+		if err := tx.QueryRowContext(ctx, "SELECT id FROM usage_conv WHERE name=?", id).Scan(&convID); err != nil {
 			return result, err
 		}
 	}
@@ -670,7 +680,7 @@ func (store *Store) Detail(ctx context.Context, id string) (model.ConversationDe
 	var first, last, fast int64
 	var totals model.UsageTotals
 	var models string
-	err := store.db.QueryRowContext(ctx, `SELECT
+	err = tx.QueryRowContext(ctx, `SELECT
  COALESCE(c.title,''),COALESCE(c.project,c.cwd,''),COALESCE(c.project_status,''),
  COALESCE(c.cwd,''),COALESCE(c.branch,''),COALESCE(c.subtasks,0),COALESCE(c.cache_write_avail,0),
  cs.app,cs.first_time,cs.last_time,cs.input,cs.output,cs.cache_read,cs.cache_write,cs.cache_write_1h,
@@ -683,7 +693,7 @@ func (store *Store) Detail(ctx context.Context, id string) (model.ConversationDe
 	}
 	result.Conversation = buildConversationSummary(meta, app, first, last, totals, models, fast)
 
-	rows, err := store.db.QueryContext(ctx, `SELECT COALESCE(u.dsh_key,hex(u.key_hash)),u.app,u.model_id,u.speed_id,
+	rows, err := tx.QueryContext(ctx, `SELECT COALESCE(u.dsh_key,hex(u.key_hash)),u.app,u.model_id,u.speed_id,
  u.time,u.input,u.output,u.cache_read,u.cache_write,u.cost,u.cache_write_1h,
  uc.input,uc.output,uc.cache_read,uc.cache_write
  FROM usage u
@@ -703,7 +713,7 @@ func (store *Store) Detail(ctx context.Context, id string) (model.ConversationDe
 			return result, err
 		}
 		row.Conversation = id
-		row.Model, row.Speed = store.resolveDict(ctx, modelID, speedID, modelNames, speedNames)
+		row.Model, row.Speed = store.resolveDict(ctx, tx, modelID, speedID, modelNames, speedNames)
 		row.Time = time.UnixMilli(milliseconds)
 		row.Requests = 1
 		if cIn.Valid {

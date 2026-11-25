@@ -1,10 +1,42 @@
 import type { QuotaLimit } from './models'
 
 export const quotaNames = ['Codex', 'Claude Code', 'Antigravity', 'Cursor', 'Command Code']
-export const usageNames = ['Codex', 'Claude Code', 'Cursor', 'Pi', 'OpenCode', 'DSH', 'Oh My Pi']
+export const usageNames = [
+  'Codex',
+  'Claude Code',
+  'Cursor',
+  'Pi',
+  'OpenCode',
+  'DSH',
+  'Oh My Pi',
+  'Antigravity',
+]
 export const quotaKeys = ['codex', 'claude', 'antigravity', 'cursor', 'commandcode']
-export const usageKeys = ['codex', 'claude', 'cursor', 'pi', 'opencode', 'dsh', 'omp']
-export const serviceColors = ['#74757d', '#d97757', '#303034', '#4b7ba9', '#168179', '#4176e6', '#9b4dff']
+export const usageKeys = ['codex', 'claude', 'cursor', 'pi', 'opencode', 'dsh', 'omp', 'antigravity']
+
+// timelineQuotaApp 将支持额度时间线的用量来源编号映射为额度服务编号
+export function timelineQuotaApp(service: number | null): number | null | undefined {
+  if (service === null) return null
+  if (service === 0 || service === 1) return service
+  if (service === 7) return 2
+  return undefined
+}
+
+// popoverProviders 优先在托盘弹窗展示启用的 Codex 与 Claude Code，否则回退至其余已启用服务
+export function popoverProviders<T extends { app: number }>(enabled: T[]): T[] {
+  const core = enabled.filter((provider) => provider.app === 0 || provider.app === 1)
+  return core.length > 0 ? core : enabled
+}
+export const serviceColors = [
+  '#74757d',
+  '#d97757',
+  '#303034',
+  '#4b7ba9',
+  '#168179',
+  '#4176e6',
+  '#9b4dff',
+  '#1a9cf0',
+]
 
 const compactEnFmt = new Intl.NumberFormat('en', { notation: 'compact', maximumFractionDigits: 1 })
 const compactZhFmt = new Intl.NumberFormat('zh', { notation: 'compact', maximumFractionDigits: 1 })

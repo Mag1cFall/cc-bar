@@ -24,6 +24,7 @@ const (
 	UsageOpencode
 	UsageDsh
 	UsageOmp
+	UsageAntigravity
 )
 
 // LimitKind 标识额度窗口
@@ -147,7 +148,7 @@ func DefaultSettings() Settings {
 	for app := Codex; app <= CommandCode; app++ {
 		settings.Providers[app] = ProviderDisplaySettings{Enabled: app != Cursor && app != CommandCode, MenuBar: app != Cursor, FloatingHud: app != Cursor}
 	}
-	for app := UsageCodex; app <= UsageOmp; app++ {
+	for app := UsageCodex; app <= UsageAntigravity; app++ {
 		settings.UsageVisibility[app] = app != UsageCursor
 	}
 	return settings

@@ -264,10 +264,13 @@ func (store *Store) recordLocked(key string, app model.QuotaApp, snapshot model.
 			historyUrgent = true
 		}
 	}
-	if (app == model.Codex || app == model.Claude) && !strings.HasPrefix(key, "codex:imported:") {
+	if (app == model.Codex || app == model.Claude || app == model.Antigravity) && !strings.HasPrefix(key, "codex:imported:") {
 		usageApp := model.UsageCodex
-		if app == model.Claude {
+		switch app {
+		case model.Claude:
 			usageApp = model.UsageClaude
+		case model.Antigravity:
+			usageApp = model.UsageAntigravity
 		}
 		if store.recordCycles(key, usageApp, snapshot, source, at) {
 			cyclesUrgent = true

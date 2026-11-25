@@ -49,13 +49,31 @@ func sameIntervals(left, right []usage.Interval) bool {
 	return true
 }
 
+// cycleModelFamily 按 Antigravity 额度分组提取用于本地用量归属的模型族
+func cycleModelFamily(record history.CycleRecord) string {
+	if record.App != model.UsageAntigravity {
+		return ""
+	}
+	lower := strings.ToLower(record.LimitID)
+	switch {
+	case strings.HasPrefix(lower, "argon"):
+		return "argon"
+	case strings.HasPrefix(lower, "gemini"):
+		return "gemini"
+	case strings.HasPrefix(lower, "claude"):
+		return "claude"
+	default:
+		return ""
+	}
+}
+
 // cycleCacheKey 生成已完成历史周期在当前用量版本下的稳定缓存键
 func cycleCacheKey(record history.CycleRecord, segmentCount int) string {
 	last := int64(0)
 	if record.LastSampleAt != nil {
 		last = record.LastSampleAt.UnixNano()
 	}
-	return record.ID + "|" + record.StartAt.Format(time.RFC3339Nano) + "|" + record.EndAt.Format(time.RFC3339Nano) + "|" + strconv.FormatInt(last, 10) + "|" + strconv.Itoa(len(record.AllowanceSegments)) + "|" + strconv.Itoa(segmentCount)
+	return record.ID + "|" + record.LimitID + "|" + record.StartAt.Format(time.RFC3339Nano) + "|" + record.EndAt.Format(time.RFC3339Nano) + "|" + strconv.FormatInt(last, 10) + "|" + strconv.Itoa(len(record.AllowanceSegments)) + "|" + strconv.Itoa(segmentCount)
 }
 
 // GetCycles 将用量按实际登录区间归属到额度周期并缓存已完成历史周期
@@ -114,8 +132,9 @@ func (service *Service) GetCycles(ctx context.Context) (result CyclesView, err e
 			if now.Before(end) {
 				end = now.Add(time.Millisecond)
 			}
+			family := cycleModelFamily(record)
 			intervals := accountIntervals(record.StartAt, end, record, payload.AccountSegments)
-			view.LocalTotals, err = service.usage.TotalsInIntervals(ctx, record.App, intervals)
+			view.LocalTotals, err = service.usage.TotalsInIntervalsForFamily(ctx, record.App, family, intervals)
 			if err != nil {
 				return result, err
 			}
@@ -130,7 +149,7 @@ func (service *Service) GetCycles(ctx context.Context) (result CyclesView, err e
 				if sameIntervals(observedIntervals, intervals) {
 					observed = view.LocalTotals
 				} else {
-					observed, err = service.usage.TotalsInIntervals(ctx, record.App, observedIntervals)
+					observed, err = service.usage.TotalsInIntervalsForFamily(ctx, record.App, family, observedIntervals)
 					if err != nil {
 						return result, err
 					}
@@ -142,7 +161,7 @@ func (service *Service) GetCycles(ctx context.Context) (result CyclesView, err e
 				} else if sameIntervals(allowanceIntervals, observedIntervals) {
 					currentAllowance = observed
 				} else {
-					currentAllowance, err = service.usage.TotalsInIntervals(ctx, record.App, allowanceIntervals)
+					currentAllowance, err = service.usage.TotalsInIntervalsForFamily(ctx, record.App, family, allowanceIntervals)
 					if err != nil {
 						return result, err
 					}

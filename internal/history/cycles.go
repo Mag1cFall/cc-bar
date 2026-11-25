@@ -138,6 +138,11 @@ func sourcePreference(a, b string) string {
 	return b
 }
 
+// sameLimitID 校验额度标识一致并兼容旧版空标识记录
+func sameLimitID(existing, incoming string) bool {
+	return existing == incoming || existing == "" || incoming == ""
+}
+
 func (store *Store) recordCycles(key string, app model.UsageApp, snapshot model.QuotaSnapshot, source string, at time.Time) bool {
 	urgent := false
 	active := -1
@@ -182,7 +187,7 @@ func (store *Store) recordCycles(key string, app model.UsageApp, snapshot model.
 		id := fmt.Sprintf("%s|%s|%d", key, limit.ID, end.Unix())
 		index := -1
 		for i, record := range store.cycles.Records {
-			if record.AccountKey != key || record.App != app || record.LimitKind != limit.Kind {
+			if record.AccountKey != key || record.App != app || record.LimitKind != limit.Kind || !sameLimitID(record.LimitID, limit.ID) {
 				continue
 			}
 			if record.ID == id || math.Abs(record.EndAt.Sub(end).Seconds()) < 60 || (record.EndAt.After(at) && math.Abs(record.ScheduledEndAt.Sub(end).Seconds()) <= 1800 && !extraReset(record.LatestUsedPercent, used)) {
@@ -236,7 +241,7 @@ func (store *Store) recordCycles(key string, app model.UsageApp, snapshot model.
 			urgent = true
 			for i := range store.cycles.Records {
 				record := &store.cycles.Records[i]
-				if record.AccountKey == key && record.App == app && record.LimitKind == limit.Kind && record.StartAt.Before(start) && record.EndAt.After(start) && math.Abs(record.StartAt.Sub(start).Seconds()) >= 60 && record.EndAt.Sub(start) > 60*time.Second {
+				if record.AccountKey == key && record.App == app && record.LimitKind == limit.Kind && sameLimitID(record.LimitID, limit.ID) && record.StartAt.Before(start) && record.EndAt.After(start) && math.Abs(record.StartAt.Sub(start).Seconds()) >= 60 && record.EndAt.Sub(start) > 60*time.Second {
 					record.EndAt = start
 					if len(record.AllowanceSegments) > 0 {
 						last := &record.AllowanceSegments[len(record.AllowanceSegments)-1]
@@ -289,7 +294,7 @@ func (store *Store) normalizeCycles() {
 		}
 		for j := i + 1; j < len(records); j++ {
 			other := records[j]
-			if consumed[j] || record.AccountKey != other.AccountKey || record.App != other.App || record.LimitKind != other.LimitKind {
+			if consumed[j] || record.AccountKey != other.AccountKey || record.App != other.App || record.LimitKind != other.LimitKind || !sameLimitID(record.LimitID, other.LimitID) {
 				continue
 			}
 			overlap := minimum(record.EndAt, other.EndAt).Sub(maximum(record.StartAt, other.StartAt))

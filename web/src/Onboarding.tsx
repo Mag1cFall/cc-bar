@@ -61,7 +61,11 @@ export default function Onboarding() {
               <Logo name={quotaKeys[provider.app] ?? ''} />
               <span>
                 <strong>{provider.name}</strong>
-                <p>{provider.account?.email ?? provider.account?.login ?? tr('Not detected', '未检测到')}</p>
+                <p>
+                  {provider.account?.email ??
+                    provider.account?.login ??
+                    (provider.account ? tr('Signed in', '已登录') : tr('Not detected', '未检测到'))}
+                </p>
               </span>
               {provider.account && <Check size={16} />}
             </div>

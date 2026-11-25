@@ -66,8 +66,10 @@ func (store *Store) Scan(ctx context.Context, rebuild bool) (scanErr error) {
 	mutated := rebuild
 	convsMutated := rebuild
 	claudeMutated := false
+	codexConvChanged := false
+	claudeConvChanged := false
 	announced := false
-	announceStart := func(total int) {
+	beginScan := func() {
 		if announced {
 			return
 		}
@@ -76,9 +78,40 @@ func (store *Store) Scan(ctx context.Context, rebuild bool) (scanErr error) {
 		store.status.IsScanning = true
 		store.status.Error = ""
 		store.status.FilesCompleted = 0
-		store.status.FilesTotal = total
+		store.status.FilesTotal = 0
 		store.statusMu.Unlock()
 		store.notify(false)
+	}
+	addProgress := func(delta int) int {
+		if delta <= 0 {
+			return 0
+		}
+		store.statusMu.Lock()
+		if !announced {
+			announced = true
+			store.status.IsScanning = true
+			store.status.Error = ""
+			store.status.FilesCompleted = 0
+			store.status.FilesTotal = 0
+		}
+		base := store.status.FilesCompleted
+		store.status.FilesTotal += delta
+		store.statusMu.Unlock()
+		store.notify(false)
+		return base
+	}
+	setProgress := func(completed int, notify bool) {
+		store.statusMu.Lock()
+		if completed > store.status.FilesCompleted {
+			store.status.FilesCompleted = completed
+		}
+		if store.status.FilesCompleted > store.status.FilesTotal {
+			store.status.FilesTotal = store.status.FilesCompleted
+		}
+		store.statusMu.Unlock()
+		if notify {
+			store.notify(false)
+		}
 	}
 	defer func() {
 		now := time.Now()
@@ -100,7 +133,7 @@ func (store *Store) Scan(ctx context.Context, rebuild bool) (scanErr error) {
 	}()
 
 	if rebuild {
-		announceStart(0)
+		beginScan()
 		if err := store.resetLocalData(ctx); err != nil {
 			return err
 		}
@@ -177,12 +210,12 @@ func (store *Store) Scan(ctx context.Context, rebuild bool) (scanErr error) {
 			}
 			return dirty[i].path < dirty[j].path
 		})
-		announceStart(len(dirty))
+		baseCompleted := addProgress(len(dirty))
 		for index, file := range dirty {
 			if err := ctx.Err(); err != nil {
 				return err
 			}
-			changed, fileErr := store.scanJSONL(ctx, file)
+			changed, convChanged, fileErr := store.scanJSONL(ctx, file)
 			if fileErr != nil {
 				problems = append(problems, fmt.Errorf("%s: %w", file.path, fileErr))
 			}
@@ -193,12 +226,14 @@ func (store *Store) Scan(ctx context.Context, rebuild bool) (scanErr error) {
 					claudeMutated = true
 				}
 			}
-			store.statusMu.Lock()
-			store.status.FilesCompleted = index + 1
-			store.statusMu.Unlock()
-			if (index+1)%30 == 0 {
-				store.notify(false)
+			if convChanged {
+				if file.app == model.UsageCodex {
+					codexConvChanged = true
+				} else if file.app == model.UsageClaude {
+					claudeConvChanged = true
+				}
 			}
+			setProgress(baseCompleted+index+1, (index+1)%30 == 0)
 		}
 	}
 
@@ -214,12 +249,20 @@ func (store *Store) Scan(ctx context.Context, rebuild bool) (scanErr error) {
 		mutated = true
 		convsMutated = true
 	}
+	agChanged, agErr := store.scanAntigravity(ctx, known, rebuild, addProgress, setProgress)
+	if agErr != nil {
+		problems = append(problems, agErr)
+	}
+	if agChanged {
+		mutated = true
+		convsMutated = true
+	}
 	if changed, err := store.mergeImported(ctx, known, rebuild || claudeMutated); err != nil {
 		problems = append(problems, err)
 	} else if changed {
 		mutated = true
 	}
-	titlesChanged, titleErr := store.applyTitles(ctx, known, rebuild)
+	titlesChanged, titleErr := store.applyTitles(ctx, known, rebuild, codexConvChanged, claudeConvChanged)
 	if titleErr != nil {
 		problems = append(problems, titleErr)
 	} else if titlesChanged {
@@ -293,31 +336,36 @@ func (store *Store) loadState(ctx context.Context, path string) (scanState, erro
 	return state, nil
 }
 
-// saveState 与用量写入共同提交当前日志解析位置
-func saveState(ctx context.Context, tx *sql.Tx, path string, state scanState, info fs.FileInfo) error {
+// saveStateStamp 使用指定文件签名与用量写入共同提交扫描游标
+func saveStateStamp(ctx context.Context, tx *sql.Tx, path string, state scanState, stamp fileStamp) error {
 	_, err := tx.ExecContext(ctx, `INSERT INTO scan_file(path,length,modified,offset,model,speed,signature,session,emitting,title,cwd,branch,subtasks,sidechain_all)
  VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(path) DO UPDATE SET length=excluded.length,modified=excluded.modified,
  offset=excluded.offset,model=excluded.model,speed=excluded.speed,signature=excluded.signature,session=excluded.session,
- emitting=excluded.emitting,title=excluded.title,cwd=excluded.cwd,branch=excluded.branch,subtasks=excluded.subtasks,sidechain_all=excluded.sidechain_all`, path, info.Size(), fileTicks(info), state.Offset, state.Model, state.Speed, nullable(state.Signature), nullable(state.Session), nullable(state.Emitting), nullable(state.Title), nullable(state.Cwd), nullable(state.Branch), state.Subtasks, state.AllChain)
+ emitting=excluded.emitting,title=excluded.title,cwd=excluded.cwd,branch=excluded.branch,subtasks=excluded.subtasks,sidechain_all=excluded.sidechain_all`, path, stamp.length, stamp.modified, state.Offset, state.Model, state.Speed, nullable(state.Signature), nullable(state.Session), nullable(state.Emitting), nullable(state.Title), nullable(state.Cwd), nullable(state.Branch), state.Subtasks, state.AllChain)
 	return err
 }
 
+// saveState 与用量写入共同提交当前日志解析位置
+func saveState(ctx context.Context, tx *sql.Tx, path string, state scanState, info fs.FileInfo) error {
+	return saveStateStamp(ctx, tx, path, state, fileStamp{length: info.Size(), modified: fileTicks(info)})
+}
+
 // scanJSONL 读取新增完整行并在文件重写时重新解析该来源
-func (store *Store) scanJSONL(ctx context.Context, file scanFile) (bool, error) {
+func (store *Store) scanJSONL(ctx context.Context, file scanFile) (bool, bool, error) {
 	info := file.info
 	if info == nil {
 		var err error
 		info, err = os.Stat(file.path)
 		if err != nil {
-			return false, err
+			return false, false, err
 		}
 	}
 	state, err := store.loadState(ctx, file.path)
 	if err != nil {
-		return false, err
+		return false, false, err
 	}
 	if state.Length == info.Size() && state.Modified == fileTicks(info) {
-		return false, nil
+		return false, false, nil
 	}
 	if file.app == model.UsageClaude {
 		state.IsSubagentPath = strings.Contains(strings.ReplaceAll(file.path, "\\", "/"), "/subagents/")
@@ -328,12 +376,12 @@ func (store *Store) scanJSONL(ctx context.Context, file scanFile) (bool, error) 
 	}
 	input, err := os.Open(file.path)
 	if err != nil {
-		return false, err
+		return false, false, err
 	}
 	defer input.Close()
 	batch, err := store.beginWrite(ctx)
 	if err != nil {
-		return false, err
+		return false, false, err
 	}
 	committed := false
 	defer func() {
@@ -343,29 +391,29 @@ func (store *Store) scanJSONL(ctx context.Context, file scanFile) (bool, error) 
 	}()
 	if state.Offset > info.Size() || state.Length == info.Size() {
 		if err = batch.deleteBySource(ctx, file.path); err != nil {
-			return false, err
+			return false, false, err
 		}
 		if _, err = batch.tx.ExecContext(ctx, "DELETE FROM scan_candidate WHERE path=?", file.path); err != nil {
-			return false, err
+			return false, false, err
 		}
 		isSub := state.IsSubagentPath
 		state = scanState{Length: -1, Model: "unknown", Speed: "standard", IsSubagentPath: isSub, Titles: map[string]string{}, Candidates: map[string][]projectCandidate{}, Session: sessionUUID.FindString(strings.TrimSuffix(filepath.Base(file.path), ".jsonl"))}
 		state.Emitting = state.Session
 	}
 	if _, err = input.Seek(state.Offset, io.SeekStart); err != nil {
-		return false, err
+		return false, false, err
 	}
 	reader := bufio.NewReaderSize(input, 131072)
 	for {
 		if err = ctx.Err(); err != nil {
-			return false, err
+			return false, false, err
 		}
 		line, readErr := reader.ReadBytes('\n')
 		if readErr == io.EOF {
 			break
 		}
 		if readErr != nil {
-			return false, readErr
+			return false, false, readErr
 		}
 		if state.Offset+int64(len(line)) > info.Size() {
 			break
@@ -384,15 +432,16 @@ func (store *Store) scanJSONL(ctx context.Context, file scanFile) (bool, error) 
 				row.Conversation = "omp:" + file.parent
 			}
 			if err = batch.saveUsage(ctx, *row, file.path); err != nil {
-				return false, err
+				return false, false, err
 			}
 		}
 		state.Offset += int64(len(line))
 	}
 	if err = saveState(ctx, batch.tx, file.path, state, info); err != nil {
-		return false, err
+		return false, false, err
 	}
 	metaChanged := false
+	convUpdated := false
 	if file.app == model.UsageClaude {
 		for session, candidates := range state.Candidates {
 			sidechain := false
@@ -400,7 +449,7 @@ func (store *Store) scanJSONL(ctx context.Context, file scanFile) (bool, error) 
 				sidechain = sidechain || candidate.Sidechain
 				res, execErr := batch.tx.ExecContext(ctx, "INSERT OR IGNORE INTO scan_candidate(path,session,cwd,sidechain) VALUES(?,?,?,?)", file.path, session, candidate.Path, candidate.Sidechain)
 				if execErr != nil {
-					return false, execErr
+					return false, false, execErr
 				}
 				if n, _ := res.RowsAffected(); n > 0 {
 					metaChanged = true
@@ -408,9 +457,10 @@ func (store *Store) scanJSONL(ctx context.Context, file scanFile) (bool, error) 
 			}
 			convChanged, convErr := saveConversation(ctx, batch.tx, "claude:"+session, state.Titles[session], state.Cwd, file.path, state.Branch, state.Subtasks || sidechain, true)
 			if convErr != nil {
-				return false, convErr
+				return false, false, convErr
 			}
 			metaChanged = metaChanged || convChanged
+			convUpdated = convUpdated || convChanged
 		}
 	} else if state.Session != "" {
 		prefix := "codex:"
@@ -430,15 +480,16 @@ func (store *Store) scanJSONL(ctx context.Context, file scanFile) (bool, error) 
 		}
 		convChanged, convErr := saveConversation(ctx, batch.tx, conversation, title, cwd, source, state.Branch, state.Subtasks, file.app == model.UsagePi || file.app == model.UsageOmp || state.CacheSeen)
 		if convErr != nil {
-			return false, convErr
+			return false, false, convErr
 		}
 		metaChanged = metaChanged || convChanged
+		convUpdated = convUpdated || convChanged
 	}
 	if err = batch.commit(ctx); err != nil {
-		return false, err
+		return false, false, err
 	}
 	committed = true
-	return batch.mutated || metaChanged, nil
+	return batch.mutated || metaChanged, convUpdated, nil
 }
 
 // repriceMissing 借助部分索引仅筛查当前价格目录可定价的缺失记录
@@ -447,7 +498,6 @@ func (store *Store) repriceMissing(ctx context.Context) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	modelNames, speedNames := store.dictSnapshot()
 	type combo struct {
 		app     model.UsageApp
 		speedID int64
@@ -455,15 +505,25 @@ func (store *Store) repriceMissing(ctx context.Context) (bool, error) {
 		speed   string
 		model   string
 	}
-	eligible := []combo{}
-	now := time.Now()
+	rawCombos := []combo{}
 	for rows.Next() {
 		var c combo
 		if err = rows.Scan(&c.app, &c.speedID, &c.modelID); err != nil {
 			rows.Close()
 			return false, err
 		}
-		c.model, c.speed = store.resolveDict(ctx, c.modelID, c.speedID, modelNames, speedNames)
+		rawCombos = append(rawCombos, c)
+	}
+	err = rows.Err()
+	rows.Close()
+	if err != nil || len(rawCombos) == 0 {
+		return false, err
+	}
+	modelNames, speedNames := store.dictSnapshot()
+	eligible := []combo{}
+	now := time.Now()
+	for _, c := range rawCombos {
+		c.model, c.speed = store.resolveDict(ctx, store.db, c.modelID, c.speedID, modelNames, speedNames)
 		if c.speed == "unknown" {
 			continue
 		}
@@ -473,10 +533,8 @@ func (store *Store) repriceMissing(ctx context.Context) (bool, error) {
 			eligible = append(eligible, c)
 		}
 	}
-	err = rows.Err()
-	rows.Close()
-	if err != nil || len(eligible) == 0 {
-		return false, err
+	if len(eligible) == 0 {
+		return false, nil
 	}
 
 	type pendingRow struct {

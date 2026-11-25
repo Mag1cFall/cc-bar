@@ -356,7 +356,13 @@ func (host *Host) ResizeSurface(ctx context.Context, width, height int) {
 	if window == nil || window.Name() == "main" {
 		return
 	}
-	width, height = max(120, min(width, 480)), max(60, min(height, 900))
+	maxHeight := 900
+	if window.Name() == "popover" {
+		if screen, err := window.GetScreen(); err == nil && screen != nil && screen.WorkArea.Height > 0 {
+			maxHeight = min(maxHeight, screen.WorkArea.Height-24)
+		}
+	}
+	width, height = max(120, min(width, 480)), max(60, min(height, maxHeight))
 	currentWidth, currentHeight := window.Size()
 	if currentWidth == width && currentHeight == height {
 		return

@@ -379,9 +379,11 @@ func parseGravity(root object) *gravityWindows {
 		}
 		if more.five == nil && more.geminiFive != nil {
 			more.five = more.geminiFive
+			more.geminiFive = nil
 		}
 		if more.weekly == nil && more.geminiWeek != nil {
 			more.weekly = more.geminiWeek
+			more.geminiWeek = nil
 		}
 		result.merge(more)
 	}
