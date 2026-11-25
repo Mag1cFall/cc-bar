@@ -777,7 +777,7 @@ func (store *Store) HasData(ctx context.Context, app model.UsageApp) bool {
 	return store.db.QueryRowContext(ctx, "SELECT 1 FROM usage WHERE app=? LIMIT 1", app).Scan(&present) == nil
 }
 
-// RefreshPricing 刷新目录并重新计算已缺失的请求价格
+// RefreshPricing 刷新目录并重算非上报记录中价格发生变化的条目
 func (store *Store) RefreshPricing(ctx context.Context) error {
 	refreshErr := store.pricing.Refresh(ctx, true)
 	store.gate.Lock()
@@ -785,7 +785,7 @@ func (store *Store) RefreshPricing(ctx context.Context) error {
 		store.gate.Unlock()
 		store.changed()
 	}()
-	if _, err := store.repriceMissing(ctx); err != nil {
+	if _, err := store.repriceAll(ctx); err != nil {
 		return err
 	}
 	return refreshErr
@@ -825,9 +825,7 @@ func (store *Store) RefreshPricingIfNeeded(ctx context.Context) error {
 		if speed == "unknown" || name == "codex-auto-review" {
 			continue
 		}
-		probeShort := model.UsageRow{App: c.app, Model: name, Speed: speed, Time: now, Input: 1}
-		probeLong := model.UsageRow{App: c.app, Model: name, Speed: speed, Time: now, Input: 300000}
-		if store.pricing.Cost(probeShort) != nil || store.pricing.Cost(probeLong) != nil {
+		if store.pricing.canPrice(c.app, name, speed, now) {
 			canReprice = true
 			continue
 		}

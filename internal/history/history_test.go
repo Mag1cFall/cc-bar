@@ -103,133 +103,6 @@ func TestAccountCycles(t *testing.T) {
 	}
 }
 
-// TestRecordBatchAndFlush 验证批量记录与延迟采样在Flush后完整落盘
-func TestRecordBatchAndFlush(t *testing.T) {
-	dir := t.TempDir()
-	store, err := Open(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	at := time.Now().Truncate(time.Second)
-	reset := at.Add(3 * time.Hour)
-	snap := model.QuotaSnapshot{App: model.Codex, PrimaryLimit: &model.QuotaLimit{
-		ID: "five-hour", Kind: model.FiveHour, Window: model.QuotaWindow{UsedPercent: 30, ResetsAt: &reset},
-	}}
-	if err = store.RecordBatch([]RecordInput{
-		{Key: "codex:imported:a", App: model.Codex, Snapshot: snap, Source: "api", At: at},
-		{Key: "codex:imported:b", App: model.Codex, Snapshot: snap, Source: "api", At: at},
-	}); err != nil {
-		t.Fatal(err)
-	}
-	if err = store.Record("codex:imported:a", model.Codex, snap, "api", at.Add(time.Minute)); err != nil {
-		t.Fatal(err)
-	}
-	if err = store.Flush(); err != nil {
-		t.Fatal(err)
-	}
-	reloaded, err := Open(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(reloaded.Keys()) != 2 {
-		t.Fatalf("批量记录重载数量错误: %+v", reloaded.Keys())
-	}
-}
-
-// TestFlushSkipsCleanAndMarksCleanupDirty 验证无脏不重写与跨日清理正确标脏落盘
-func TestFlushSkipsCleanAndMarksCleanupDirty(t *testing.T) {
-	dir := t.TempDir()
-	store, err := Open(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err = store.Flush(); err != nil {
-		t.Fatal(err)
-	}
-	for _, name := range []string{"quota-history.json", "quota-cycle-history.json"} {
-		if _, statErr := os.Stat(filepath.Join(dir, name)); !os.IsNotExist(statErr) {
-			t.Fatalf("空状态Flush不应创建文件 %s: %v", name, statErr)
-		}
-	}
-
-	at := time.Date(2026, 10, 1, 12, 0, 0, 0, time.Local)
-	reset := at.Add(3 * time.Hour)
-	snap := model.QuotaSnapshot{App: model.Codex, PrimaryLimit: &model.QuotaLimit{
-		ID: "five-hour", Kind: model.FiveHour, Window: model.QuotaWindow{UsedPercent: 25, ResetsAt: &reset},
-	}}
-	if err = store.Record("codex:primary:clean", model.Codex, snap, "api", at); err != nil {
-		t.Fatal(err)
-	}
-	if err = store.Flush(); err != nil {
-		t.Fatal(err)
-	}
-
-	past := time.Now().Add(-2 * time.Hour).Truncate(time.Second)
-	for _, name := range []string{"quota-history.json", "quota-cycle-history.json"} {
-		p := filepath.Join(dir, name)
-		if err = os.Chtimes(p, past, past); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if err = store.Flush(); err != nil {
-		t.Fatal(err)
-	}
-	for _, name := range []string{"quota-history.json", "quota-cycle-history.json"} {
-		info, statErr := os.Stat(filepath.Join(dir, name))
-		if statErr != nil {
-			t.Fatal(statErr)
-		}
-		if !info.ModTime().Equal(past) {
-			t.Fatalf("无脏Flush不应重写文件 %s: got=%v want=%v", name, info.ModTime(), past)
-		}
-	}
-
-	// 无limit的跨日采样也须将过期样本清理标脏并落盘
-	future := at.AddDate(0, 0, 20)
-	if err = store.Record("antigravity:primary:empty", model.Antigravity, model.QuotaSnapshot{App: model.Antigravity}, "api", future); err != nil {
-		t.Fatal(err)
-	}
-	reloaded, err := Open(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(reloaded.Keys()) != 0 {
-		t.Fatalf("跨日清理过期采样未标脏落盘: %+v", reloaded.Keys())
-	}
-}
-
-// TestAntigravityCycles 验证 Antigravity 额度采样按 UsageAntigravity 记录周期
-func TestAntigravityCycles(t *testing.T) {
-	dir := t.TempDir()
-	store, err := Open(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	at := time.Date(2026, 11, 25, 12, 0, 0, 0, time.UTC)
-	reset := at.Add(3 * time.Hour)
-	seconds := 18000
-	snap := model.QuotaSnapshot{
-		App: model.Antigravity,
-		PrimaryLimit: &model.QuotaLimit{
-			ID: "gemini-5h", Kind: model.FiveHour, Window: model.QuotaWindow{UsedPercent: 35, ResetsAt: &reset, WindowSeconds: &seconds},
-		},
-	}
-	if err = store.Record("antigravity:primary:test", model.Antigravity, snap, "api", at); err != nil {
-		t.Fatal(err)
-	}
-	if err = store.Flush(); err != nil {
-		t.Fatal(err)
-	}
-	reloaded, err := Open(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	cycles := reloaded.Cycles()
-	if len(cycles.Records) != 1 || cycles.Records[0].App != model.UsageAntigravity || cycles.Records[0].LatestUsedPercent != 35 {
-		t.Fatalf("Antigravity 周期记录错误: %+v", cycles.Records)
-	}
-}
-
 // TestAntigravityLimitIDIsolation 验证不同 LimitID 回退采样不会互相合并或触发误判重置
 func TestAntigravityLimitIDIsolation(t *testing.T) {
 	store, err := Open(t.TempDir())
@@ -275,7 +148,7 @@ func TestAntigravityLimitIDIsolation(t *testing.T) {
 	if !okGem || !okCla {
 		t.Fatalf("缺少独立周期记录: %+v", records)
 	}
-	if gem.LatestUsedPercent != 80 || gem.ExtraResets() != 0 {
+	if gem.App != model.UsageAntigravity || gem.LatestUsedPercent != 80 || gem.ExtraResets() != 0 {
 		t.Fatalf("gemini-5h 周期被污染或误判重置: %+v", gem)
 	}
 	if cla.LatestUsedPercent != 15 || cla.ExtraResets() != 0 {

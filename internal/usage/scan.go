@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"math"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -524,12 +525,7 @@ func (store *Store) repriceMissing(ctx context.Context) (bool, error) {
 	now := time.Now()
 	for _, c := range rawCombos {
 		c.model, c.speed = store.resolveDict(ctx, store.db, c.modelID, c.speedID, modelNames, speedNames)
-		if c.speed == "unknown" {
-			continue
-		}
-		probeShort := model.UsageRow{App: c.app, Model: c.model, Speed: c.speed, Time: now, Input: 1}
-		probeLong := model.UsageRow{App: c.app, Model: c.model, Speed: c.speed, Time: now, Input: 300000}
-		if store.pricing.Cost(probeShort) != nil || store.pricing.Cost(probeLong) != nil {
+		if store.pricing.canPrice(c.app, c.model, c.speed, now) {
 			eligible = append(eligible, c)
 		}
 	}
@@ -591,6 +587,70 @@ func (store *Store) repriceMissing(ctx context.Context) (bool, error) {
 			return false, err
 		}
 		touchedConvs[p.convID] = struct{}{}
+	}
+	stmt.Close()
+	if err = refreshConvSummaries(ctx, tx, touchedConvs); err != nil {
+		return false, err
+	}
+	return true, tx.Commit()
+}
+
+// repriceAll 重算全部非上报费用记录并仅更新价格发生变化的条目
+func (store *Store) repriceAll(ctx context.Context) (bool, error) {
+	rows, err := store.db.QueryContext(ctx, `SELECT u.id,u.app,u.conv_id,m.name,s.name,u.time,u.input,u.output,u.cache_read,u.cache_write,u.cache_write_1h,u.cost
+ FROM usage u
+ JOIN usage_model m ON m.id=u.model_id
+ JOIN usage_speed s ON s.id=u.speed_id
+ JOIN usage_source src ON src.id=u.source_id
+ WHERE u.app<>2 AND s.name<>'unknown' AND src.path<>'imported-backfill'
+  AND NOT EXISTS (SELECT 1 FROM usage_cost uc WHERE uc.usage_id=u.id)`)
+	if err != nil {
+		return false, err
+	}
+	type costUpdate struct {
+		id     int64
+		convID int64
+		cost   float64
+	}
+	updates := []costUpdate{}
+	for rows.Next() {
+		var id, convID, ms int64
+		var row model.UsageRow
+		var oldCost sql.NullFloat64
+		if err = rows.Scan(&id, &row.App, &convID, &row.Model, &row.Speed, &ms, &row.Input, &row.Output, &row.CacheRead, &row.CacheWrite, &row.CacheWrite1h, &oldCost); err != nil {
+			rows.Close()
+			return false, err
+		}
+		row.Time = time.UnixMilli(ms)
+		cost := store.pricing.Cost(row)
+		if cost == nil {
+			continue
+		}
+		if !oldCost.Valid || math.Abs(*cost-oldCost.Float64) > 1e-9 {
+			updates = append(updates, costUpdate{id: id, convID: convID, cost: *cost})
+		}
+	}
+	err = rows.Err()
+	rows.Close()
+	if err != nil || len(updates) == 0 {
+		return false, err
+	}
+	tx, err := store.db.BeginTx(ctx, nil)
+	if err != nil {
+		return false, err
+	}
+	defer tx.Rollback()
+	stmt, err := tx.PrepareContext(ctx, "UPDATE usage SET cost=? WHERE id=?")
+	if err != nil {
+		return false, err
+	}
+	touchedConvs := map[int64]struct{}{}
+	for _, u := range updates {
+		if _, err = stmt.ExecContext(ctx, u.cost, u.id); err != nil {
+			stmt.Close()
+			return false, err
+		}
+		touchedConvs[u.convID] = struct{}{}
 	}
 	stmt.Close()
 	if err = refreshConvSummaries(ctx, tx, touchedConvs); err != nil {

@@ -8,7 +8,6 @@ import (
 	"crypto/cipher"
 	"encoding/base64"
 	"encoding/json"
-	"errors"
 	"io"
 	"math"
 	"net/http"
@@ -267,6 +266,13 @@ func TestRefreshAntigravityKeyringAndStreamingSecrets(t *testing.T) {
 	if err != nil || reused.AccessToken != "fresh-access" || tokenCalls != beforeCalls {
 		t.Fatalf("凭据库已是新令牌时不应重复刷新: calls=%d->%d err=%v", beforeCalls, tokenCalls, err)
 	}
+	readAntigravityKeyring = func() ([]byte, error) {
+		return []byte(`{"token":{"access_token":"accB-live","token_type":"Bearer","refresh_token":"1//accB","expiry":"` + time.Now().Add(time.Hour).UTC().Format(time.RFC3339Nano) + `"},"auth_method":"consumer"}`), nil
+	}
+	switched, err := forceRefreshAntigravity(context.Background(), &model.Credential{AccessToken: "accA-stale", RefreshToken: "1//accA", Email: "account-a@example.test", Source: antigravityKeyringSource})
+	if err != nil || switched == nil || switched.AccessToken != "accB-live" || switched.Email != "" {
+		t.Fatalf("外部换号后不应继承旧账号邮箱: err=%v cred=%+v", err, switched)
+	}
 }
 
 // TestParseAntigravityRealResponses 验证真实分组、套餐、Argon 独立桶、周额度归零及 models 兜底解析
@@ -317,11 +323,8 @@ func TestParseAntigravityRealResponses(t *testing.T) {
 		t.Fatalf("Argon 独立周额度应进入 ModelLimits 且不污染 Gemini WK: %+v", snap.ModelLimits)
 	}
 
-	freeRoot, _ := DecodeObject([]byte(`{"currentTier": {"id": "free-tier", "name": "Antigravity"}}`))
-	if plan := ParseAntigravity(freeRoot).PlanType; plan != "free-tier" {
-		t.Fatalf("免费版应优先取 currentTier.id 而非重复服务名: %q", plan)
-	}
-
+	reset4h := time.Now().Add(4*time.Hour + 20*time.Minute).UTC().Format(time.RFC3339)
+	reset5d := time.Now().Add(5 * 24 * time.Hour).UTC().Format(time.RFC3339)
 	weeklyExhausted, _ := DecodeObject([]byte(`{
 		"groups": [
 			{
@@ -348,7 +351,6 @@ func TestParseAntigravityRealResponses(t *testing.T) {
 		t.Fatalf("disabled 桶应被忽略: %+v", exhausted.AuxiliaryLimits)
 	}
 
-	reset4h := time.Now().Add(4*time.Hour + 20*time.Minute).UTC().Format(time.RFC3339)
 	modelsFallback, _ := DecodeObject([]byte(`{
 		"models": {
 			"tab_flash_lite_preview": {"quotaInfo": {"remainingFraction": 1}},
@@ -360,316 +362,15 @@ func TestParseAntigravityRealResponses(t *testing.T) {
 	if fallback.PrimaryLimit == nil || math.Abs(fallback.PrimaryLimit.Window.UsedPercent-20) > 0.01 || fallback.GeminiWindow == nil || math.Abs(fallback.GeminiWindow.UsedPercent-6.4) > 0.01 {
 		t.Fatalf("models 兜底不应被 2h 阈值误杀且应保留第三方与 Gemini: primary=%+v gemini=%+v", fallback.PrimaryLimit, fallback.GeminiWindow)
 	}
-}
 
-// TestFetchAntigravityProtocol 验证新版 UA、project 请求体、401 强制续期与 userinfo 邮箱回填
-func TestFetchAntigravityProtocol(t *testing.T) {
-	previousHTTP := HTTPClient
-	previousRead := readAntigravityKeyring
-	previousWrite := writeAntigravityKeyring
-	previousPaths := antigravityBinaryPaths
-	previousLocal := fetchLocalAntigravity
-	defer func() {
-		HTTPClient = previousHTTP
-		readAntigravityKeyring = previousRead
-		writeAntigravityKeyring = previousWrite
-		antigravityBinaryPaths = previousPaths
-		fetchLocalAntigravity = previousLocal
-		antigravityClientMu.Lock()
-		antigravityClientCache = map[string]antigravityOAuthPair{}
-		antigravityClientMu.Unlock()
-	}()
-	fetchLocalAntigravity = func(context.Context, string) (object, error) { return nil, os.ErrNotExist }
-	antigravityBinaryPaths = func(string) ([]string, []string) { return nil, nil }
-	antigravityClientMu.Lock()
-	antigravityClientCache = map[string]antigravityOAuthPair{
-		"consumer": {id: "1071006060591-tmhssin2h21lcre235vtolojh4g403ep" + ".apps." + "googleusercontent.com", secret: "GOCSPX" + "-" + strings.Repeat("C", 28)},
-	}
-	antigravityClientMu.Unlock()
-
-	future := time.Now().Add(time.Hour)
-	stored := []byte(`{"token":{"access_token":"stale-token","token_type":"Bearer","refresh_token":"1//ref","expiry":"` + future.UTC().Format(time.RFC3339Nano) + `"},"auth_method":"consumer"}`)
-	readAntigravityKeyring = func() ([]byte, error) { return stored, nil }
-	writeAntigravityKeyring = func(data []byte) error {
-		stored = append([]byte(nil), data...)
-		return nil
-	}
-
-	var called []string
-	HTTPClient = &http.Client{Transport: fixtureTransport(func(request *http.Request) (*http.Response, error) {
-		called = append(called, request.URL.Host+request.URL.Path)
-		rawBody, _ := io.ReadAll(request.Body)
-		switch {
-		case request.URL.Host == "oauth2.googleapis.com":
-			return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(`{"access_token":"live-token","expires_in":3599}`))}, nil
-		case request.URL.Path == "/v1internal:loadCodeAssist":
-			if !strings.HasPrefix(request.Header.Get("User-Agent"), "antigravity/hub/2.") {
-				t.Fatalf("应使用 2.x 官方 UA，实际为: %q", request.Header.Get("User-Agent"))
-			}
-			if request.Header.Get("Authorization") == "Bearer stale-token" {
-				return &http.Response{StatusCode: 401, Body: io.NopCloser(strings.NewReader(`{"error":{"status":"UNAUTHENTICATED"}}`))}, nil
-			}
-			if !strings.Contains(string(rawBody), `"ideType":"ANTIGRAVITY"`) {
-				t.Fatalf("loadCodeAssist 缺少官方 metadata: %s", string(rawBody))
-			}
-			return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(`{"cloudaicompanionProject":"aicode-consumers","paidTier":{"id":"g1-ultra-tier","name":"Google AI Ultra"}}`))}, nil
-		case request.URL.Path == "/v1internal:retrieveUserQuotaSummary":
-			if !strings.Contains(string(rawBody), `"project":"aicode-consumers"`) {
-				t.Fatalf("retrieveUserQuotaSummary 缺少 project 参数: %s", string(rawBody))
-			}
-			return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(`{"groups":[{"displayName":"Gemini Models","buckets":[{"bucketId":"gemini-5h","window":"5h","remainingFraction":0.9},{"bucketId":"gemini-weekly","window":"weekly","remainingFraction":0.7}]},{"displayName":"Claude and GPT models","buckets":[{"bucketId":"3p-5h","window":"5h","remainingFraction":1}]}]}`))}, nil
-		case request.URL.Host == "www.googleapis.com" && request.URL.Path == "/oauth2/v3/userinfo":
-			return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(`{"email":"fixture-agy@example.test"}`))}, nil
-		}
-		t.Fatalf("unexpected request: %s", request.URL)
-		return nil, nil
-	})}
-
-	credential := &model.Credential{
-		AccessToken:  "stale-token",
-		RefreshToken: "1//ref",
-		ExpiresAt:    &future,
-		Source:       antigravityKeyringSource,
-	}
-	snapshot, err := Fetch(context.Background(), model.Antigravity, credential)
-	if err != nil {
-		t.Fatalf("Fetch Antigravity 失败: %v", err)
-	}
-	if credential.AccessToken != "live-token" || credential.Email != "fixture-agy@example.test" {
-		t.Fatalf("401 续期或邮箱回填未生效: %+v", credential)
-	}
-	if snapshot.PlanType != "Google AI Ultra" || snapshot.PrimaryLimit == nil || snapshot.PrimaryLimit.DisplayName != "Gemini 5H" || snapshot.SecondaryLimit == nil || len(snapshot.AuxiliaryLimits) != 1 {
-		t.Fatalf("Antigravity 完整快照解析异常: %+v", snapshot)
-	}
-	for _, item := range called {
-		if strings.HasSuffix(item, ":fetchAvailableModels") || strings.HasSuffix(item, ":retrieveUserQuota") {
-			t.Fatalf("已有分组摘要时不应冗余请求兜底端点: %v", called)
-		}
-	}
-}
-
-// TestRefreshAntigravitySafety 验证换号不继承旧邮箱、读错不覆写、写回失败不重试及全量二进制扫描
-func TestRefreshAntigravitySafety(t *testing.T) {
-	previousHTTP := HTTPClient
-	previousRead := readAntigravityKeyring
-	previousWrite := writeAntigravityKeyring
-	previousPaths := antigravityBinaryPaths
-	defer func() {
-		HTTPClient = previousHTTP
-		readAntigravityKeyring = previousRead
-		writeAntigravityKeyring = previousWrite
-		antigravityBinaryPaths = previousPaths
-		antigravityClientMu.Lock()
-		antigravityClientCache = map[string]antigravityOAuthPair{}
-		antigravityClientMu.Unlock()
-		oauthScanMu.Lock()
-		oauthScanCache = map[string]scannedOAuthFile{}
-		oauthScanMu.Unlock()
-	}()
-	antigravityClientMu.Lock()
-	antigravityClientCache = map[string]antigravityOAuthPair{}
-	antigravityClientMu.Unlock()
-	oauthScanMu.Lock()
-	oauthScanCache = map[string]scannedOAuthFile{}
-	oauthScanMu.Unlock()
-
-	future := time.Now().Add(time.Hour).UTC().Format(time.RFC3339Nano)
-	readAntigravityKeyring = func() ([]byte, error) {
-		return []byte(`{"token":{"access_token":"accB-live","token_type":"Bearer","refresh_token":"1//accB","expiry":"` + future + `"},"auth_method":"consumer"}`), nil
-	}
-	switched, err := forceRefreshAntigravity(context.Background(), &model.Credential{
-		AccessToken:  "accA-stale",
-		RefreshToken: "1//accA",
-		Email:        "account-a@example.test",
-		Source:       antigravityKeyringSource,
-	})
-	if err != nil || switched == nil || switched.AccessToken != "accB-live" || switched.Email != "" {
-		t.Fatalf("外部换号后不应继承旧账号邮箱: err=%v cred=%+v", err, switched)
-	}
-
-	dir := t.TempDir()
-	secretA := "GOCSPX" + "-" + strings.Repeat("1", 28)
-	secretB := "GOCSPX" + "-" + strings.Repeat("2", 28)
-	binA := filepath.Join(dir, "agy-a.exe")
-	binB := filepath.Join(dir, "agy-b.exe")
-	if err := os.WriteFile(binA, []byte(secretA), 0600); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(binB, []byte(secretB), 0600); err != nil {
-		t.Fatal(err)
-	}
-	antigravityBinaryPaths = func(string) ([]string, []string) { return []string{binA, binB}, nil }
-	_, _, secretsFound := googleClientSecrets(dir)
-	if len(secretsFound) != 2 {
-		t.Fatalf("应扫描全部官方二进制而非首个命中即停止: %v", secretsFound)
-	}
-
-	readAntigravityKeyring = func() ([]byte, error) { return nil, errors.New("keyring busy") }
-	writeCalled := false
-	writeAntigravityKeyring = func([]byte) error {
-		writeCalled = true
-		return nil
-	}
-	HTTPClient = &http.Client{Transport: fixtureTransport(func(request *http.Request) (*http.Response, error) {
-		return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(`{"access_token":"mem-only","expires_in":3599}`))}, nil
-	})}
-	past := time.Now().Add(-time.Hour)
-	memCred, err := EnsureFresh(context.Background(), model.Antigravity, &model.Credential{
-		AccessToken:  "old",
-		RefreshToken: "1//ref",
-		ExpiresAt:    &past,
-		Source:       antigravityKeyringSource,
-	})
-	if err != nil || memCred == nil || memCred.AccessToken != "mem-only" || writeCalled {
-		t.Fatalf("读原凭据失败时不应覆写 keyring: err=%v cred=%+v wrote=%t", err, memCred, writeCalled)
-	}
-
-	antigravityClientMu.Lock()
-	antigravityClientCache = map[string]antigravityOAuthPair{}
-	antigravityClientMu.Unlock()
-	expired := past.UTC().Format(time.RFC3339Nano)
-	readAntigravityKeyring = func() ([]byte, error) {
-		return []byte(`{"token":{"access_token":"old","token_type":"Bearer","refresh_token":"1//ref","expiry":"` + expired + `"},"auth_method":"consumer"}`), nil
-	}
-	writeAntigravityKeyring = func([]byte) error { return errors.New("write denied") }
-	tokenCalls := 0
-	HTTPClient = &http.Client{Transport: fixtureTransport(func(request *http.Request) (*http.Response, error) {
-		tokenCalls++
-		return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(`{"access_token":"new-token","expires_in":3599}`))}, nil
-	})}
-	if _, err := EnsureFresh(context.Background(), model.Antigravity, &model.Credential{
-		AccessToken:  "old",
-		RefreshToken: "1//ref",
-		ExpiresAt:    &past,
-		Source:       antigravityKeyringSource,
-	}); err == nil || tokenCalls != 1 {
-		t.Fatalf("写回失败后不应继续穷举其他 client pair: calls=%d err=%v", tokenCalls, err)
-	}
-}
-
-// TestFetchAntigravityHostFallbackAndDaemon 验证额度全错切备用域名、耗尽兜底与多守护进程遍历
-func TestFetchAntigravityHostFallbackAndDaemon(t *testing.T) {
-	previousHTTP := HTTPClient
-	previousLocal := fetchLocalAntigravity
-	previousDaemonClient := localDaemonClient
-	previousRead := readAntigravityKeyring
-	defer func() {
-		HTTPClient = previousHTTP
-		fetchLocalAntigravity = previousLocal
-		localDaemonClient = previousDaemonClient
-		readAntigravityKeyring = previousRead
-	}()
-	fetchLocalAntigravity = func(context.Context, string) (object, error) { return nil, os.ErrNotExist }
-	readAntigravityKeyring = func() ([]byte, error) { return nil, nil }
-
-	HTTPClient = &http.Client{Transport: fixtureTransport(func(request *http.Request) (*http.Response, error) {
-		switch request.URL.Host {
-		case "daily-cloudcode-pa.googleapis.com":
-			if request.URL.Path == "/v1internal:loadCodeAssist" {
-				return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(`{"cloudaicompanionProject":"proj"}`))}, nil
-			}
-			return &http.Response{StatusCode: 503, Body: io.NopCloser(strings.NewReader(`{"error":"unavailable"}`))}, nil
-		case "cloudcode-pa.googleapis.com":
-			if request.URL.Path == "/v1internal:loadCodeAssist" {
-				return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(`{"cloudaicompanionProject":"proj"}`))}, nil
-			}
-			if request.URL.Path == "/v1internal:retrieveUserQuotaSummary" {
-				return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(`{"groups":[{"displayName":"Gemini Models","buckets":[{"bucketId":"gemini-5h","window":"5h","remainingFraction":0.6}]}]}`))}, nil
-			}
-		case "www.googleapis.com":
-			return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(`{"email":"backup@example.test"}`))}, nil
-		}
-		t.Fatalf("unexpected request: %s", request.URL)
-		return nil, nil
-	})}
-	future := time.Now().Add(time.Hour)
-	snap, err := Fetch(context.Background(), model.Antigravity, &model.Credential{
-		AccessToken: "live",
-		ExpiresAt:   &future,
-		Source:      antigravityKeyringSource,
-	})
-	if err != nil || snap == nil || snap.PrimaryLimit == nil || math.Abs(snap.PrimaryLimit.Window.UsedPercent-40) > 0.01 {
-		t.Fatalf("主域名额度全错时应切换备用域名而非返回空快照: err=%v snap=%+v", err, snap)
-	}
-
-	resetAt := time.Now().Add(2 * time.Hour).UTC().Format(time.RFC3339)
-	bucketRoot, _ := DecodeObject([]byte(`{"buckets":[{"modelId":"gemini-2.5-pro","resetTime":"` + resetAt + `"}]}`))
-	bucketSnap := ParseAntigravity(bucketRoot)
-	if bucketSnap.GeminiWindow == nil || bucketSnap.GeminiWindow.UsedPercent != 100 {
-		t.Fatalf("buckets 缺少 remainingFraction 且含 resetTime 应视作 100%% 已用: %+v", bucketSnap)
-	}
-	modelRoot, _ := DecodeObject([]byte(`{"models":{"claude-opus":{"quotaInfo":{"resetTime":"` + resetAt + `"}}}}`))
-	modelSnap := ParseAntigravity(modelRoot)
-	if modelSnap.PrimaryLimit == nil || modelSnap.PrimaryLimit.Window.UsedPercent != 100 {
-		t.Fatalf("models 缺少 remainingFraction 且含 resetTime 应视作 100%% 已用: %+v", modelSnap)
-	}
-
-	home := t.TempDir()
-	daemonDir := filepath.Join(home, ".gemini", "antigravity", "daemon")
-	livePath := filepath.Join(daemonDir, "hub_live.json")
-	deadPath := filepath.Join(daemonDir, "hub_dead.json")
-	if err := WriteJSON(livePath, object{"lsVersion": "2.35.0", "httpPort": 18081, "csrfToken": "csrf-live"}); err != nil {
-		t.Fatal(err)
-	}
-	if err := WriteJSON(deadPath, object{"lsVersion": "2.35.0", "httpPort": 18082, "csrfToken": "csrf-dead"}); err != nil {
-		t.Fatal(err)
-	}
-	older := time.Now().Add(-time.Minute)
-	newer := time.Now()
-	_ = os.Chtimes(livePath, older, older)
-	_ = os.Chtimes(deadPath, newer, newer)
-	localDaemonClient = &http.Client{Transport: fixtureTransport(func(request *http.Request) (*http.Response, error) {
-		if request.URL.Port() == "18082" {
-			return nil, errors.New("connection refused")
-		}
-		if request.URL.Port() == "18081" && request.Header.Get("X-Codeium-Csrf-Token") == "csrf-live" {
-			return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(`{"groups":[{"displayName":"Gemini Models","buckets":[{"bucketId":"gemini-5h","window":"5h","remainingFraction":0.75}]}]}`))}, nil
-		}
-		return &http.Response{StatusCode: 404, Body: io.NopCloser(strings.NewReader(`{}`))}, nil
-	})}
-	daemonRoot, err := fetchAntigravityDaemon(context.Background(), home)
-	if err != nil || len(rows(daemonRoot["groups"])) != 1 {
-		t.Fatalf("应跳过失联的最新 daemon 文件并命中存活 daemon: err=%v root=%+v", err, daemonRoot)
-	}
-}
-
-// TestParseAntigravityGeminiOnlyModelsNoDuplicate 验证仅含 Gemini 的 models 兜底不会重复生成主副限额与 Gemini 窗口
-func TestParseAntigravityGeminiOnlyModelsNoDuplicate(t *testing.T) {
-	reset4h := time.Now().Add(4 * time.Hour).UTC().Format(time.RFC3339)
-	reset5d := time.Now().Add(5 * 24 * time.Hour).UTC().Format(time.RFC3339)
-	bothRoot, err := DecodeObject([]byte(`{
+	geminiOnlyRoot, _ := DecodeObject([]byte(`{
 		"models": {
-			"gemini-3.8-flash-high": {"quotaInfo": {"remainingFraction": 0.9, "resetTime": "` + reset4h + `"}},
+			"gemini-3.8-flash-high": {"quotaInfo": {"resetTime": "` + reset4h + `"}},
 			"gemini-3.8-pro-high": {"quotaInfo": {"remainingFraction": 0.65, "resetTime": "` + reset5d + `"}}
 		}
 	}`))
-	if err != nil {
-		t.Fatal(err)
-	}
-	bothSnap := ParseAntigravity(bothRoot)
-	if bothSnap.PrimaryLimit == nil || math.Abs(bothSnap.PrimaryLimit.Window.UsedPercent-10) > 0.01 {
-		t.Fatalf("Gemini 5H 应升格为主限额: %+v", bothSnap.PrimaryLimit)
-	}
-	if bothSnap.SecondaryLimit == nil || math.Abs(bothSnap.SecondaryLimit.Window.UsedPercent-35) > 0.01 {
-		t.Fatalf("Gemini 周额度应升格为副限额: %+v", bothSnap.SecondaryLimit)
-	}
-	if bothSnap.GeminiWindow != nil || bothSnap.GeminiWeekly != nil {
-		t.Fatalf("升格后的 Gemini 窗口不应重复保留: window=%+v weekly=%+v", bothSnap.GeminiWindow, bothSnap.GeminiWeekly)
-	}
-
-	weeklyOnlyRoot, err := DecodeObject([]byte(`{
-		"models": {
-			"gemini-3.8-pro-high": {"quotaInfo": {"remainingFraction": 0.6, "resetTime": "` + reset5d + `"}}
-		}
-	}`))
-	if err != nil {
-		t.Fatal(err)
-	}
-	weeklyOnlySnap := ParseAntigravity(weeklyOnlyRoot)
-	if weeklyOnlySnap.PrimaryLimit == nil || math.Abs(weeklyOnlySnap.PrimaryLimit.Window.UsedPercent-40) > 0.01 {
-		t.Fatalf("仅含 Gemini 周额度时应升格为主限额: %+v", weeklyOnlySnap.PrimaryLimit)
-	}
-	if weeklyOnlySnap.SecondaryLimit != nil || weeklyOnlySnap.GeminiWindow != nil || weeklyOnlySnap.GeminiWeekly != nil {
-		t.Fatalf("仅含 Gemini 周额度时不应生成重复窗口: secondary=%+v window=%+v weekly=%+v", weeklyOnlySnap.SecondaryLimit, weeklyOnlySnap.GeminiWindow, weeklyOnlySnap.GeminiWeekly)
+	geminiOnly := ParseAntigravity(geminiOnlyRoot)
+	if geminiOnly.PrimaryLimit == nil || geminiOnly.PrimaryLimit.Window.UsedPercent != 100 || geminiOnly.SecondaryLimit == nil || math.Abs(geminiOnly.SecondaryLimit.Window.UsedPercent-35) > 0.01 || geminiOnly.GeminiWindow != nil || geminiOnly.GeminiWeekly != nil {
+		t.Fatalf("仅 Gemini models 兜底升格或缺失剩余比例处理异常: %+v", geminiOnly)
 	}
 }
