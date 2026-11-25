@@ -1,4 +1,4 @@
-import { useState, type CSSProperties } from 'react'
+import { useMemo, useState, type CSSProperties } from 'react'
 import * as Collapsible from '@radix-ui/react-collapsible'
 import { ArrowDownWideNarrow, ChevronDown } from 'lucide-react'
 import { Bar, BarChart, CartesianGrid, Cell, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts'
@@ -10,26 +10,52 @@ import { useQuery } from '../hooks'
 import type { Overview as OverviewData, UsageGroup, UsageQuery } from '../models'
 import { TokenBreakdown } from './shared'
 
-export default function Overview({ query }: { query: UsageQuery }) {
+export default function Overview({ query, active = true }: { query: UsageQuery; active?: boolean }) {
   const { revision, tr, english, snapshot } = useApp()
   const [metric, setMetric] = useState('cost')
-  const result = useQuery(`${JSON.stringify(query)}:${revision}`, () => api.overview(query))
+  const result = useQuery(`${JSON.stringify(query)}:${revision}`, () => api.overview(query), active)
   const data = result.data
-  const services = [...(data?.services ?? [])].sort((left, right) => (left.app ?? 0) - (right.app ?? 0))
+  const services = useMemo(
+    () => [...(data?.services ?? [])].sort((left, right) => (left.app ?? 0) - (right.app ?? 0)),
+    [data?.services],
+  )
   // 服务卡始终沿用侧栏的可见范围，筛选其他服务时显示短横线
-  const visibleServices = usageNames
-    .map((name, app) => ({ name, app }))
-    .filter(
-      ({ app }) =>
-        snapshot.settings.usageVisibility[String(app)] &&
-        (app !== 2 || snapshot.settings.providers['3']?.enabled),
-    )
-  const buckets = (data?.buckets ?? []).map((bucket) => {
-    const record: Record<string, number | string> = { at: bucket.at }
-    for (const group of bucket.services ?? [])
-      record[`app${group.app ?? 0}`] = metric === 'cost' ? group.totals.cost : group.totals.tokens
-    return record
-  })
+  const visibleServices = useMemo(
+    () =>
+      usageNames
+        .map((name, app) => ({ name, app }))
+        .filter(
+          ({ app }) =>
+            snapshot.settings.usageVisibility[String(app)] &&
+            (app !== 2 || snapshot.settings.providers['3']?.enabled),
+        ),
+    [snapshot.settings.usageVisibility, snapshot.settings.providers],
+  )
+  const fromMs = useMemo(() => new Date(query.from).valueOf(), [query.from])
+  const toMs = useMemo(() => new Date(query.to).valueOf(), [query.to])
+  const buckets = useMemo(
+    () =>
+      (data?.buckets ?? []).map((bucket) => {
+        const record: Record<string, number | string> = { at: bucket.at }
+        for (const group of bucket.services ?? [])
+          record[`app${group.app ?? 0}`] = metric === 'cost' ? group.totals.cost : group.totals.tokens
+        return record
+      }),
+    [data?.buckets, metric],
+  )
+  const bucketOpacities = useMemo(
+    () =>
+      (data?.buckets ?? []).map((bucket) => {
+        const atMs = new Date(bucket.at).valueOf()
+        return atMs >= fromMs && atMs < toMs ? 1 : 0.4
+      }),
+    [data?.buckets, fromMs, toMs],
+  )
+  const bucketMap = useMemo(() => {
+    const map = new Map<string, NonNullable<OverviewData['buckets']>[number]>()
+    for (const bucket of data?.buckets ?? []) map.set(bucket.at, bucket)
+    return map
+  }, [data?.buckets])
   return (
     <>
       <QueryState pending={result.pending} error={result.error} />
@@ -195,11 +221,11 @@ export default function Overview({ query }: { query: UsageQuery }) {
                         tickLine={false}
                       />
                       <Tooltip
-                        content={({ active, label }) => (
+                        content={({ active: tipActive, label }) => (
                           <BucketTooltip
-                            active={active}
+                            active={tipActive}
                             at={typeof label === 'string' ? label : undefined}
-                            buckets={data.buckets ?? []}
+                            bucketMap={bucketMap}
                           />
                         )}
                         cursor={{ fill: 'var(--hover)' }}
@@ -214,16 +240,8 @@ export default function Overview({ query }: { query: UsageQuery }) {
                           maxBarSize={36}
                           isAnimationActive={false}
                         >
-                          {(data.buckets ?? []).map((bucket) => (
-                            <Cell
-                              key={bucket.at}
-                              fillOpacity={
-                                new Date(bucket.at).valueOf() >= new Date(query.from).valueOf() &&
-                                new Date(bucket.at).valueOf() < new Date(query.to).valueOf()
-                                  ? 1
-                                  : 0.4
-                              }
-                            />
+                          {(data.buckets ?? []).map((bucket, index) => (
+                            <Cell key={bucket.at} fillOpacity={bucketOpacities[index] ?? 1} />
                           ))}
                         </Bar>
                       ))}
@@ -246,14 +264,14 @@ export default function Overview({ query }: { query: UsageQuery }) {
 function BucketTooltip({
   active,
   at,
-  buckets,
+  bucketMap,
 }: {
   active?: boolean
   at?: string
-  buckets: NonNullable<OverviewData['buckets']>
+  bucketMap: Map<string, NonNullable<OverviewData['buckets']>[number]>
 }) {
   const { english, tr } = useApp()
-  const bucket = buckets.find((value) => value.at === at)
+  const bucket = at ? bucketMap.get(at) : undefined
   if (!active || !bucket) return null
   return (
     <div className="card padded" style={{ width: 260, background: 'var(--surface)' }}>
@@ -317,14 +335,18 @@ function GroupTable({
   const { tr, english } = useApp()
   const [sort, setSort] = useState('cost'),
     [expanded, setExpanded] = useState<string>()
-  const ordered = [...groups].sort((left, right) =>
-    sort === 'name'
-      ? left.name.localeCompare(right.name)
-      : sort === 'tokens'
-        ? right.totals.tokens - left.totals.tokens
-        : sort === 'requests'
-          ? right.totals.requests - left.totals.requests
-          : right.totals.cost - left.totals.cost,
+  const ordered = useMemo(
+    () =>
+      [...groups].sort((left, right) =>
+        sort === 'name'
+          ? left.name.localeCompare(right.name)
+          : sort === 'tokens'
+            ? right.totals.tokens - left.totals.tokens
+            : sort === 'requests'
+              ? right.totals.requests - left.totals.requests
+              : right.totals.cost - left.totals.cost,
+      ),
+    [groups, sort],
   )
   return (
     <Section

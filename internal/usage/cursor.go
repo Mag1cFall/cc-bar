@@ -285,13 +285,29 @@ func (store *Store) RefreshCursor(ctx context.Context, account model.Credential,
 		return err
 	}
 	source := "cursor:" + account.AccountID
-	tx, err := store.db.BeginTx(ctx, nil)
+	batch, err := store.beginWrite(ctx)
 	if err != nil {
 		return err
 	}
-	defer tx.Rollback()
-	if _, err = tx.ExecContext(ctx, "DELETE FROM usage WHERE app=? AND source=? AND time>=? AND time<?", model.UsageCursor, source, from.UnixMilli(), to.UnixMilli()); err != nil {
+	committed := false
+	defer func() {
+		if !committed {
+			batch.rollback()
+		}
+	}()
+	srcID, err := batch.internSource(ctx, source)
+	if err != nil {
 		return err
+	}
+	convID, err := batch.internConv(ctx, "cursor:daily")
+	if err != nil {
+		return err
+	}
+	if res, delErr := batch.tx.ExecContext(ctx, "DELETE FROM usage WHERE app=? AND source_id=? AND time>=? AND time<?", model.UsageCursor, srcID, from.UnixMilli(), to.UnixMilli()); delErr != nil {
+		return delErr
+	} else if n, _ := res.RowsAffected(); n > 0 {
+		batch.touchedConvs[convID] = struct{}{}
+		batch.mutated = true
 	}
 	duplicates := map[string]int{}
 	for _, row := range rows {
@@ -305,14 +321,18 @@ func (store *Store) RefreshCursor(ctx context.Context, account model.Credential,
 		identity := fmt.Sprintf("%s:%d:%q:%d:%d:%d:%d:%s", source, row.Time.UnixMilli(), row.Model, row.Input, row.Output, row.CacheRead, row.CacheWrite, charge)
 		row.ID = fmt.Sprintf("%s:%d", identity, duplicates[identity])
 		duplicates[identity]++
-		if err = saveUsage(ctx, tx, row, source); err != nil {
+		if err = batch.saveUsage(ctx, row, source); err != nil {
 			return err
 		}
 	}
-	if _, err = tx.ExecContext(ctx, "INSERT INTO scan_meta(name,value) VALUES(?,?) ON CONFLICT(name) DO UPDATE SET value=excluded.value", "cursor-coverage:"+account.AccountID+":"+strconv.FormatInt(from.UnixMilli(), 10), to.UnixMilli()); err != nil {
+	if _, err = batch.tx.ExecContext(ctx, "INSERT INTO scan_meta(name,value) VALUES(?,?) ON CONFLICT(name) DO UPDATE SET value=excluded.value", "cursor-coverage:"+account.AccountID+":"+strconv.FormatInt(from.UnixMilli(), 10), to.UnixMilli()); err != nil {
 		return err
 	}
-	return tx.Commit()
+	if err = batch.commit(ctx); err != nil {
+		return err
+	}
+	committed = true
+	return nil
 }
 
 // RefreshCursorRecent 补足本周与计费周期并重新查询最近三天

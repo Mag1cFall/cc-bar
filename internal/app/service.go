@@ -39,6 +39,12 @@ type LocalService struct {
 	Source   string `json:"source"`
 }
 
+// PopoverUsage 返回托盘弹窗所需的各服务今日与本周费用
+type PopoverUsage struct {
+	Today map[string]float64 `json:"today"`
+	Week  map[string]float64 `json:"week"`
+}
+
 // Snapshot 返回全部界面的共享状态
 type Snapshot struct {
 	Version               string                   `json:"version"`
@@ -52,9 +58,11 @@ type Snapshot struct {
 	Scan                  model.UsageStatus        `json:"scan"`
 	Locale                string                   `json:"locale"`
 }
-
 type cachedProvider struct {
 	AccountKey string               `json:"accountKey"`
+	Source     string               `json:"source,omitempty"`
+	Email      string               `json:"email,omitempty"`
+	Token      string               `json:"token,omitempty"`
 	Snapshot   *model.QuotaSnapshot `json:"snapshot"`
 }
 type quotaCache struct {
@@ -84,6 +92,11 @@ type Service struct {
 	paused                 atomic.Bool
 	idle                   atomic.Bool
 	notifyTimer            *time.Timer
+	localServicesCache     map[string]LocalService
+	localServicesAt        time.Time
+	cyclesCacheMu          sync.Mutex
+	cyclesCacheRev         uint64
+	cyclesCache            map[string]CycleView
 	logger                 *slog.Logger
 	logLevel               *slog.LevelVar
 }
@@ -236,6 +249,16 @@ func (service *Service) GetSnapshot() Snapshot {
 }
 
 func (service *Service) localServices() map[string]LocalService {
+	service.mu.RLock()
+	if service.localServicesCache != nil && time.Since(service.localServicesAt) < 30*time.Second {
+		cached := make(map[string]LocalService, len(service.localServicesCache))
+		for k, v := range service.localServicesCache {
+			cached[k] = v
+		}
+		service.mu.RUnlock()
+		return cached
+	}
+	service.mu.RUnlock()
 	locations := map[string]string{
 		"3": filepath.Join(service.home, ".pi", "agent", "sessions"),
 		"4": filepath.Join(service.home, ".local", "share", "opencode"),
@@ -258,6 +281,13 @@ func (service *Service) localServices() map[string]LocalService {
 			result[fmt.Sprint(app)] = LocalService{Detected: true, Source: strings.Join(paths, "; ")}
 		}
 	}
+	service.mu.Lock()
+	service.localServicesCache = make(map[string]LocalService, len(result))
+	for k, v := range result {
+		service.localServicesCache[k] = v
+	}
+	service.localServicesAt = time.Now()
+	service.mu.Unlock()
 	return result
 }
 
@@ -305,6 +335,11 @@ func (service *Service) refresh() {
 	var group sync.WaitGroup
 	for app := model.Codex; app <= model.CommandCode; app++ {
 		if !settings.Providers[app].Enabled {
+			group.Add(1)
+			go func(app model.QuotaApp) {
+				defer group.Done()
+				service.discoverProvider(app, settings)
+			}(app)
 			continue
 		}
 		group.Add(1)
@@ -320,24 +355,107 @@ func (service *Service) refresh() {
 		_ = service.accounts.RefreshClaude(service.ctx)
 	}()
 	group.Wait()
+	batch := []history.RecordInput{}
 	for _, account := range service.accounts.ListCodex() {
 		if account.Snapshot != nil {
-			_ = service.history.Record("codex:imported:"+account.ID, model.Codex, *account.Snapshot, "api", account.Snapshot.FetchedAt)
+			batch = append(batch, history.RecordInput{Key: "codex:imported:" + account.ID, App: model.Codex, Snapshot: *account.Snapshot, Source: "api", At: account.Snapshot.FetchedAt})
 		}
 	}
+	_ = service.history.RecordBatch(batch)
 	service.changed()
 }
 
-func accountID(credential *model.Credential) string {
+func explicitAccountID(credential *model.Credential) string {
 	if credential == nil {
 		return ""
 	}
-	for _, identity := range []string{credential.AccountID, credential.AccountUUID, credential.UserID, credential.Email, credential.Source} {
+	for _, identity := range []string{credential.AccountID, credential.AccountUUID, credential.UserID, credential.Email} {
 		if identity != "" {
 			return identity
 		}
 	}
 	return ""
+}
+
+func accountID(credential *model.Credential) string {
+	if identity := explicitAccountID(credential); identity != "" {
+		return identity
+	}
+	if credential != nil {
+		return credential.Source
+	}
+	return ""
+}
+
+// sameAccount 判断两次探测或补全邮箱前后的凭据是否属于同一账号
+func sameAccount(a, b *model.Credential) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	if a.Source != b.Source {
+		return false
+	}
+	idA, idB := explicitAccountID(a), explicitAccountID(b)
+	if idA != "" && idB != "" {
+		return idA == idB
+	}
+	if a.RefreshToken != "" && b.RefreshToken != "" {
+		return a.RefreshToken == b.RefreshToken
+	}
+	if a.AccessToken != "" && b.AccessToken != "" {
+		return a.AccessToken == b.AccessToken
+	}
+	return true
+}
+
+func credentialToken(credential *model.Credential) string {
+	if credential == nil {
+		return ""
+	}
+	if credential.RefreshToken != "" {
+		return credential.RefreshToken
+	}
+	return credential.AccessToken
+}
+
+func cacheMatches(cached cachedProvider, credential *model.Credential) bool {
+	if credential == nil || cached.Snapshot == nil {
+		return false
+	}
+	if id := explicitAccountID(credential); id != "" {
+		return cached.AccountKey == id
+	}
+	token := credentialToken(credential)
+	return credential.Source != "" && cached.Source == credential.Source && token != "" && cached.Token == token
+}
+
+// discoverProvider 仅执行本地凭据探测以便未启用服务也能显示连接状态
+func (service *Service) discoverProvider(app model.QuotaApp, settings model.Settings) {
+	credential, err := providers.Discover(app, settings)
+	if err != nil {
+		return
+	}
+	service.mu.Lock()
+	defer service.mu.Unlock()
+	state := service.states[app]
+	if !sameAccount(state.Account, credential) {
+		state.Snapshot = nil
+		state.LastSuccessAt = nil
+		state.Error = ""
+		delete(service.backoff, app)
+	}
+	if credential != nil {
+		published := *credential
+		if published.Email == "" && sameAccount(state.Account, credential) && state.Account != nil {
+			published.Email = state.Account.Email
+		}
+		state.Account = &published
+		state.Source = credential.Source
+	} else {
+		state.Account = nil
+		state.Source = ""
+	}
+	service.states[app] = state
 }
 
 func (service *Service) refreshProvider(app model.QuotaApp, settings model.Settings) {
@@ -348,7 +466,8 @@ func (service *Service) refreshProvider(app model.QuotaApp, settings model.Setti
 	}
 	service.mu.Lock()
 	state := service.states[app]
-	if accountID(state.Account) != accountID(credential) {
+	previousAccount := state.Account
+	if !sameAccount(previousAccount, credential) {
 		state.Snapshot = nil
 		state.LastSuccessAt = nil
 		state.Error = ""
@@ -356,15 +475,22 @@ func (service *Service) refreshProvider(app model.QuotaApp, settings model.Setti
 	}
 	if credential != nil {
 		published := *credential
+		if published.Email == "" && sameAccount(previousAccount, credential) && previousAccount != nil {
+			published.Email = previousAccount.Email
+		}
 		state.Account = &published
+		state.Source = credential.Source
 	} else {
 		state.Account = nil
+		state.Source = ""
 	}
-	if credential != nil {
-		state.Source = credential.Source
-	}
-	if cached := service.cache.Providers[app]; state.Snapshot == nil && cached.AccountKey == accountID(credential) {
-		state.Snapshot = cached.Snapshot
+	if cached := service.cache.Providers[app]; cacheMatches(cached, credential) {
+		if state.Snapshot == nil {
+			state.Snapshot = cached.Snapshot
+		}
+		if state.Account != nil && state.Account.Email == "" && cached.Email != "" {
+			state.Account.Email = cached.Email
+		}
 	}
 	service.states[app] = state
 	if credential == nil {
@@ -392,7 +518,7 @@ func (service *Service) refreshProvider(app model.QuotaApp, settings model.Setti
 		return
 	}
 	current, _ := providers.Discover(app, settings)
-	if accountID(current) != accountID(credential) || current != nil && current.Source != credential.Source {
+	if !sameAccount(current, credential) {
 		service.mu.Lock()
 		state = service.states[app]
 		state.Refreshing = false
@@ -409,7 +535,7 @@ func (service *Service) refreshProvider(app model.QuotaApp, settings model.Setti
 	state.ErrorKind = ""
 	state.Refreshing = false
 	service.states[app] = state
-	service.cache.Providers[app] = cachedProvider{accountID(credential), snapshot}
+	service.cache.Providers[app] = cachedProvider{AccountKey: accountID(credential), Source: credential.Source, Email: credential.Email, Token: credentialToken(credential), Snapshot: snapshot}
 	cacheErr := writeJSON(service.dataDir, "quota-cache.json", service.cache)
 	service.mu.Unlock()
 	if cacheErr != nil {
@@ -444,16 +570,52 @@ func (service *Service) providerError(app model.QuotaApp, err error) {
 
 // ScanUsage 扫描增量日志或重建本地统计
 func (service *Service) ScanUsage(ctx context.Context, rebuild bool) error {
-	if !service.scanGate.TryLock() {
+	if rebuild {
+		service.scanGate.Lock()
+	} else if !service.scanGate.TryLock() {
+		service.dirty.Store(true)
 		return nil
 	}
 	defer service.scanGate.Unlock()
+	service.mu.Lock()
+	service.localServicesAt = time.Time{}
+	service.mu.Unlock()
 	err := service.usage.Scan(ctx, rebuild)
 	if err != nil {
 		service.logger.Warn("日志扫描失败", "error", err)
 	}
-	service.changed()
 	return err
+}
+
+// GetPopoverUsage 返回托盘弹窗展示所需的各服务今日与本周费用
+func (service *Service) GetPopoverUsage(ctx context.Context, todayFrom, weekFrom, to string) (PopoverUsage, error) {
+	result := PopoverUsage{Today: map[string]float64{}, Week: map[string]float64{}}
+	todayAt, err := time.Parse(time.RFC3339Nano, todayFrom)
+	if err != nil {
+		return result, err
+	}
+	weekAt, err := time.Parse(time.RFC3339Nano, weekFrom)
+	if err != nil {
+		return result, err
+	}
+	toAt, err := time.Parse(time.RFC3339Nano, to)
+	if err != nil {
+		return result, err
+	}
+	todayCosts, weekCosts, err := service.usage.PopoverCosts(ctx, service.visibleUsageApps(), todayAt, weekAt, toAt)
+	if errors.Is(err, context.Canceled) {
+		return result, nil
+	}
+	if err != nil {
+		return result, err
+	}
+	for app, cost := range todayCosts {
+		result.Today[fmt.Sprint(app)] = cost
+	}
+	for app, cost := range weekCosts {
+		result.Week[fmt.Sprint(app)] = cost
+	}
+	return result, nil
 }
 
 // GetOverview 返回完整统计与环比图表
@@ -541,9 +703,7 @@ func (service *Service) GetConversation(ctx context.Context, id string) (model.C
 
 // RefreshPrices 更新价格并重新计算已保存事件
 func (service *Service) RefreshPrices(ctx context.Context) error {
-	err := service.usage.RefreshPricing(ctx)
-	service.changed()
-	return err
+	return service.usage.RefreshPricing(ctx)
 }
 
 // OpenDataDirectory 打开本机统计与设置目录

@@ -8,7 +8,6 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"regexp"
 	"sort"
 	"strings"
 	"sync"
@@ -54,7 +53,25 @@ var claudeFast = map[string]Price{
 	"claude-opus-5.5": {8, 40, .4, 10}, "claude-opus-5-5": {8, 40, .4, 10}, "claude-opus-5": {10, 50, 1, 12.5}, "claude-opus-4-8": {10, 50, 1, 12.5}, "claude-opus-4-7": {30, 150, 3, 37.5}, "claude-opus-4-6": {30, 150, 3, 37.5},
 }
 
-var datedModel = regexp.MustCompile(`-(?:\d{8}|\d{4}-\d{2}-\d{2})$`)
+// stripDateSuffix 在末段为8位日期或YYYY-MM-DD时原地裁除版本后缀
+func stripDateSuffix(name string) string {
+	n := len(name)
+	isDigits := func(s string) bool {
+		for i := 0; i < len(s); i++ {
+			if s[i] < '0' || s[i] > '9' {
+				return false
+			}
+		}
+		return true
+	}
+	if n > 9 && name[n-9] == '-' && isDigits(name[n-8:]) {
+		return name[:n-9]
+	}
+	if n > 11 && name[n-11] == '-' && name[n-6] == '-' && name[n-3] == '-' && isDigits(name[n-10:n-6]) && isDigits(name[n-5:n-3]) && isDigits(name[n-2:]) {
+		return name[:n-11]
+	}
+	return name
+}
 
 // NormalizeModel 移除提供商前缀和版本日期以匹配价格目录
 func NormalizeModel(name string) string {
@@ -75,7 +92,7 @@ func NormalizeModel(name string) string {
 	if at := strings.IndexByte(name, '@'); at >= 0 {
 		name = name[:at]
 	}
-	return datedModel.ReplaceAllString(name, "")
+	return stripDateSuffix(name)
 }
 
 type priceSource struct {
@@ -99,8 +116,16 @@ type Pricing struct {
 	mu      sync.RWMutex
 	refresh sync.Mutex
 	active  catalog
+	version uint64
 	path    string
 	client  *http.Client
+}
+
+// Version 返回价格目录内容变更版本号
+func (pricing *Pricing) Version() uint64 {
+	pricing.mu.RLock()
+	defer pricing.mu.RUnlock()
+	return pricing.version
 }
 
 // NewPricing 加载现有价格缓存并保留历史价格规则
@@ -418,6 +443,9 @@ func (pricing *Pricing) Refresh(ctx context.Context, force bool) error {
 			pricing.active.LiteLLM = source
 		} else {
 			pricing.active.ModelsDev = source
+		}
+		if err == nil {
+			pricing.version++
 		}
 		data, marshalErr := json.Marshal(pricing.active)
 		pricing.mu.Unlock()

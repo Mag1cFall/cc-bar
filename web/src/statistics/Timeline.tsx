@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useMemo, useState } from 'react'
 import { CartesianGrid, Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts'
 import { api } from '../bridge'
 import { Card, Empty, QueryState, Section, Segments, Select } from '../components'
@@ -7,7 +7,7 @@ import { dateTime, usageNames } from '../format'
 import { useQuery } from '../hooks'
 import type { Timeline as TimelineModel } from '../models'
 
-export default function Timeline({ service }: { service: number | null }) {
+export default function Timeline({ service, active = true }: { service: number | null; active?: boolean }) {
   const { tr, revision, snapshot } = useApp()
   const [limitKind, setLimitKind] = useState('0')
   const supportsQuota = service === null || service <= 2
@@ -23,7 +23,7 @@ export default function Timeline({ service }: { service: number | null }) {
   const result = useQuery(
     `${JSON.stringify(request)}:${revision}:${quotaRevision}`,
     () => api.timeline(request),
-    supportsQuota,
+    active && supportsQuota,
   )
   if (!supportsQuota)
     return (
@@ -86,8 +86,12 @@ function AccountTimeline({
   const initialPeriod = periods.find((value) => value.entries?.length) ?? periods[0]
   const [selected, setSelected] = useState(initialPeriod?.id ?? '')
   const period = periods.find((value) => value.id === selected) ?? initialPeriod
-  const entries = period?.entries ?? []
-  const data = entries.map((entry) => ({ ...entry, at: new Date(entry.sampledAt).valueOf() }))
+  const entries = useMemo(() => period?.entries ?? [], [period?.entries])
+  const data = useMemo(
+    () => entries.map((entry) => ({ ...entry, at: new Date(entry.sampledAt).valueOf() })),
+    [entries],
+  )
+  const reversedEntries = useMemo(() => [...entries].reverse(), [entries])
   const names = ['Codex', 'Claude Code', 'Antigravity', 'Cursor', 'Command Code']
   const serviceName = names[account.app] ?? usageNames[account.app] ?? ''
   const accountName = snapshot.settings.privacyMode ? tr('Account', '账号') : account.name
@@ -192,7 +196,7 @@ function AccountTimeline({
                   </tr>
                 </thead>
                 <tbody>
-                  {[...entries].reverse().map((entry) => (
+                  {reversedEntries.map((entry) => (
                     <tr key={entry.id}>
                       <td>{dateTime(entry.sampledAt, english, true)}</td>
                       <td>{entry.remainingPercent.toFixed(1)}%</td>

@@ -8,6 +8,7 @@ import type {
   ConversationQuery,
   Cycles,
   Overview,
+  PopoverUsage,
   ResetCredits,
   ResetResult,
   ReleaseUpdate,
@@ -31,6 +32,8 @@ export const api = {
   refresh: () => invoke<void>('RefreshQuotas'),
   scan: (rebuild = false) => invoke<void>('ScanUsage', rebuild),
   overview: (query: UsageQuery) => invoke<Overview>('GetOverview', query),
+  popoverUsage: (todayFrom: string, weekFrom: string, to: string) =>
+    invoke<PopoverUsage>('GetPopoverUsage', todayFrom, weekFrom, to),
   conversations: (query: ConversationQuery) => invoke<ConversationPage>('GetConversations', query),
   conversation: (id: string) => invoke<ConversationDetail>('GetConversation', id),
   cycles: () => invoke<Cycles>('GetCycles'),

@@ -7,6 +7,7 @@ import { api } from './bridge'
 import { AppContext } from './context'
 import { Button, Logo, Segments } from './components'
 import { usageKeys, usageNames } from './format'
+import { isPageVisible, usePageVisible } from './hooks'
 import type { Settings as SettingsModel, Snapshot } from './models'
 import Accounts from './Accounts'
 import MiniWindows from './MiniWindows'
@@ -30,6 +31,8 @@ export default function App() {
   const [operations, setOperations] = useState(0)
   const [initialError, setInitialError] = useState('')
   const dataSignature = useRef('')
+  const stale = useRef(false)
+  const visible = usePageVisible()
   const mode = new URLSearchParams(location.search).get('window') ?? 'main'
   const english =
     (snapshot?.settings.language === 'system' ? snapshot.locale : snapshot?.settings.language)?.startsWith(
@@ -56,22 +59,26 @@ export default function App() {
     applySnapshot(await api.snapshot())
   }
   const fetchSnapshot = useEffectEvent(() => api.snapshot())
+  const reloadSnapshot = useEffectEvent(() => {
+    stale.current = false
+    void fetchSnapshot()
+      .then((value) => {
+        startTransition(() => applySnapshot(value))
+        setInitialError('')
+      })
+      .catch((cause: unknown) => {
+        setInitialError(cause instanceof Error ? cause.message : String(cause))
+      })
+  })
   useEffect(() => {
-    let mounted = true
-    const reload = () => {
-      void fetchSnapshot()
-        .then((value) => {
-          if (mounted) {
-            startTransition(() => applySnapshot(value))
-            setInitialError('')
-          }
-        })
-        .catch((cause: unknown) => {
-          if (mounted) setInitialError(cause instanceof Error ? cause.message : String(cause))
-        })
-    }
-    reload()
-    const changed = Events.On('ccbar:changed', reload)
+    reloadSnapshot()
+    const changed = Events.On('ccbar:changed', () => {
+      if (!isPageVisible()) {
+        stale.current = true
+        return
+      }
+      reloadSnapshot()
+    })
     const unsubscribeNavigate = Events.On('ccbar:navigate', (event) => {
       if (mode !== 'main') return
       const data: unknown = event.data
@@ -79,15 +86,18 @@ export default function App() {
         const next =
           data.page === 'statistics' ? 'overview' : data.page === 'settings' ? 'services' : data.page
         flushSync(() => setPage(next))
+        if (stale.current) reloadSnapshot()
         void api.presentMain().catch(console.error)
       }
     })
     return () => {
-      mounted = false
       changed()
       unsubscribeNavigate()
     }
   }, [mode])
+  useEffect(() => {
+    if (visible && stale.current) reloadSnapshot()
+  }, [visible])
   useEffect(() => {
     document.documentElement.lang = english ? 'en' : 'zh-CN'
   }, [english])
@@ -271,7 +281,11 @@ export default function App() {
           </aside>
           <main className="main-content">
             <div hidden={settingsActive}>
-              <Statistics page={statisticsPage} service={selectedService} />
+              <Statistics
+                page={statisticsPage}
+                service={selectedService}
+                active={!settingsActive && visible}
+              />
             </div>
             {page === 'claude-accounts' ? <Accounts /> : settingsActive ? <Settings page={page} /> : null}
           </main>

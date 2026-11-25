@@ -1,3 +1,4 @@
+import { useMemo } from 'react'
 import { api } from '../bridge'
 import * as Collapsible from '@radix-ui/react-collapsible'
 import { ChevronDown } from 'lucide-react'
@@ -17,19 +18,29 @@ import { useQuery } from '../hooks'
 import type { Cycle } from '../models'
 import { TokenBreakdown } from './shared'
 
-export default function Cycles({ service }: { service: number | null }) {
+export default function Cycles({ service, active = true }: { service: number | null; active?: boolean }) {
   const { tr, english, revision, snapshot } = useApp()
   const quotaRevision = [
     ...snapshot.providers.map((provider) => provider.snapshot?.fetchedAt),
     ...snapshot.claudeAccounts.map((account) => account.snapshot?.fetchedAt),
   ].join()
-  const result = useQuery(`${revision}:${quotaRevision}`, api.cycles)
-  const records = (result.data?.records ?? []).filter((record) => service === null || record.app === service)
-  const current = records.filter((record) => record.isCurrent && record.isActiveAccount)
-  const apps = [0, 1].filter((app) => service === null || service === app)
-  const historical = records
-    .filter((record) => !record.isCurrent || !record.isActiveAccount)
-    .sort((left, right) => right.startAt.localeCompare(left.startAt))
+  const result = useQuery(`${revision}:${quotaRevision}`, api.cycles, active)
+  const records = useMemo(
+    () => (result.data?.records ?? []).filter((record) => service === null || record.app === service),
+    [result.data?.records, service],
+  )
+  const current = useMemo(
+    () => records.filter((record) => record.isCurrent && record.isActiveAccount),
+    [records],
+  )
+  const apps = useMemo(() => [0, 1].filter((app) => service === null || service === app), [service])
+  const historical = useMemo(
+    () =>
+      records
+        .filter((record) => !record.isCurrent || !record.isActiveAccount)
+        .sort((left, right) => right.startAt.localeCompare(left.startAt)),
+    [records],
+  )
   return (
     <>
       <QueryState pending={result.pending} error={result.error} />

@@ -3,6 +3,7 @@ package usage
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/binary"
 	"encoding/json"
 	"errors"
@@ -155,20 +156,22 @@ func dshRoot(id string, parents map[string]string) string {
 	return current
 }
 
-func (store *Store) scanDsh(ctx context.Context) error {
+// scanDsh 仅在DSH会话文件发生变化时解压归并并更新V2表
+func (store *Store) scanDsh(ctx context.Context, known map[string]fileStamp, rebuild bool) (bool, error) {
 	type selected struct {
 		path       string
 		version    int
 		compressed bool
+		info       fs.FileInfo
 	}
 	selectedFiles := map[string]selected{}
 	root := filepath.Join(store.home, ".dsh", "sessions")
-	err := filepath.WalkDir(root, func(path string, entry fs.DirEntry, err error) error {
-		if errors.Is(err, os.ErrNotExist) {
+	err := filepath.WalkDir(root, func(path string, entry fs.DirEntry, walkErr error) error {
+		if errors.Is(walkErr, os.ErrNotExist) {
 			return nil
 		}
-		if err != nil {
-			return err
+		if walkErr != nil {
+			return walkErr
 		}
 		if entry.IsDir() {
 			return nil
@@ -177,8 +180,12 @@ func (store *Store) scanDsh(ctx context.Context) error {
 		if matched == nil {
 			return nil
 		}
+		info, infoErr := entry.Info()
+		if infoErr != nil {
+			return nil
+		}
 		version, _ := strconv.Atoi(matched[1])
-		candidate := selected{path, version, matched[2] != ""}
+		candidate := selected{path, version, matched[2] != "", info}
 		directory := filepath.Dir(path)
 		old, exists := selectedFiles[directory]
 		if !exists || version > old.version || (version == old.version && candidate.compressed && !old.compressed) {
@@ -187,18 +194,33 @@ func (store *Store) scanDsh(ctx context.Context) error {
 		return ctx.Err()
 	})
 	if err != nil {
-		return err
+		return false, err
 	}
-	parents := map[string]string{}
-	files := []string{}
+	if len(selectedFiles) == 0 {
+		return false, nil
+	}
+
+	anyChanged := rebuild
+	files := make([]selected, 0, len(selectedFiles))
 	for _, entry := range selectedFiles {
-		files = append(files, entry.path)
+		files = append(files, entry)
+		if !anyChanged {
+			stamp, ok := known[entry.path]
+			if !ok || stamp.length != entry.info.Size() || stamp.modified != fileTicks(entry.info) {
+				anyChanged = true
+			}
+		}
 	}
-	sort.Strings(files)
-	for _, path := range files {
-		lines, readErr := dshLines(path)
+	if !anyChanged {
+		return false, nil
+	}
+	sort.Slice(files, func(i, j int) bool { return files[i].path < files[j].path })
+
+	parents := map[string]string{}
+	for _, entry := range files {
+		lines, readErr := dshLines(entry.path)
 		if readErr != nil {
-			return readErr
+			return false, readErr
 		}
 		for index, line := range lines {
 			if index >= 20 {
@@ -218,48 +240,100 @@ func (store *Store) scanDsh(ctx context.Context) error {
 	for id := range parents {
 		roots[id] = dshRoot(id, parents)
 	}
-	tx, err := store.db.BeginTx(ctx, nil)
-	if err != nil {
-		return err
+
+	prevRoots := map[string]string{}
+	if !rebuild {
+		var saved string
+		if err = store.db.QueryRowContext(ctx, "SELECT value FROM scan_blob WHERE name='dsh_roots'").Scan(&saved); err == nil {
+			_ = json.Unmarshal([]byte(saved), &prevRoots)
+		} else if !errors.Is(err, sql.ErrNoRows) {
+			return false, err
+		}
 	}
+
+	batch, err := store.beginWrite(ctx)
+	if err != nil {
+		return false, err
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			batch.rollback()
+		}
+	}()
 	for id, resolved := range roots {
-		if _, err = tx.ExecContext(ctx, "UPDATE usage SET conversation=? WHERE app=? AND event_key LIKE ?", "dsh:"+resolved, model.UsageDsh, "dsh:"+id+":%"); err != nil {
-			tx.Rollback()
-			return err
+		if !rebuild && prevRoots[id] == resolved {
+			continue
+		}
+		targetConvID, convErr := batch.internConv(ctx, "dsh:"+resolved)
+		if convErr != nil {
+			return false, convErr
+		}
+		oldRows, qErr := batch.tx.QueryContext(ctx, "SELECT DISTINCT conv_id FROM usage WHERE app=? AND dsh_key LIKE ? AND conv_id<>?", model.UsageDsh, "dsh:"+id+":%", targetConvID)
+		if qErr != nil {
+			return false, qErr
+		}
+		oldIDs := []int64{}
+		for oldRows.Next() {
+			var cid int64
+			if err = oldRows.Scan(&cid); err != nil {
+				oldRows.Close()
+				return false, err
+			}
+			oldIDs = append(oldIDs, cid)
+		}
+		if err = oldRows.Err(); err != nil {
+			oldRows.Close()
+			return false, err
+		}
+		oldRows.Close()
+		if len(oldIDs) > 0 {
+			if _, err = batch.tx.ExecContext(ctx, "UPDATE usage SET conv_id=? WHERE app=? AND dsh_key LIKE ?", targetConvID, model.UsageDsh, "dsh:"+id+":%"); err != nil {
+				return false, err
+			}
+			for _, cid := range oldIDs {
+				batch.touchedConvs[cid] = struct{}{}
+			}
+			batch.touchedConvs[targetConvID] = struct{}{}
+			batch.mutated = true
 		}
 	}
 	data, _ := json.Marshal(roots)
-	if _, err = tx.ExecContext(ctx, "INSERT INTO scan_blob(name,value) VALUES('dsh_roots',?) ON CONFLICT(name) DO UPDATE SET value=excluded.value", string(data)); err != nil {
-		tx.Rollback()
-		return err
+	if _, err = batch.tx.ExecContext(ctx, "INSERT INTO scan_blob(name,value) VALUES('dsh_roots',?) ON CONFLICT(name) DO UPDATE SET value=excluded.value", string(data)); err != nil {
+		return false, err
 	}
-	if err = tx.Commit(); err != nil {
-		return err
+	if err = batch.commit(ctx); err != nil {
+		return false, err
 	}
+	committed = true
+
+	mutated := batch.mutated
 	type meta struct{ title, cwd, path string }
 	metadata := map[string]meta{}
-	for _, path := range files {
-		info, err := os.Stat(path)
-		if err != nil {
-			return err
+	for _, entry := range files {
+		state, loadErr := store.loadState(ctx, entry.path)
+		if loadErr != nil {
+			return mutated, loadErr
 		}
-		state, err := store.loadState(ctx, path)
-		if err != nil {
-			return err
-		}
-		if state.Length != info.Size() || state.Modified != fileTicks(info) {
-			state, err = store.scanDshFile(ctx, path, info, roots)
+		if state.Length != entry.info.Size() || state.Modified != fileTicks(entry.info) {
+			var fileChanged bool
+			state, fileChanged, err = store.scanDshFile(ctx, entry.path, entry.info, roots)
 			if err != nil {
-				return err
+				return mutated, err
 			}
+			mutated = mutated || fileChanged
 		}
 		if state.Session != "" {
-			metadata[state.Session] = meta{state.Title, state.Cwd, path}
+			metadata[state.Session] = meta{state.Title, state.Cwd, entry.path}
 		}
 	}
-	rows, err := store.db.QueryContext(ctx, "SELECT conversation,COUNT(DISTINCT substr(event_key,5,instr(substr(event_key,5),':')-1)) FROM usage WHERE app=? GROUP BY conversation", model.UsageDsh)
+
+	rows, err := store.db.QueryContext(ctx, `SELECT cv.name,COUNT(DISTINCT substr(u.dsh_key,5,instr(substr(u.dsh_key,5),':')-1))
+ FROM usage u JOIN usage_conv cv ON cv.id=u.conv_id
+ WHERE u.app=? AND u.dsh_key IS NOT NULL
+ GROUP BY u.conv_id`, model.UsageDsh)
 	if err != nil {
-		return err
+		return mutated, err
 	}
 	counts := map[string]int{}
 	for rows.Next() {
@@ -267,18 +341,19 @@ func (store *Store) scanDsh(ctx context.Context) error {
 		var count int
 		if err = rows.Scan(&id, &count); err != nil {
 			rows.Close()
-			return err
+			return mutated, err
 		}
 		counts[id] = count
 	}
 	err = rows.Err()
 	rows.Close()
 	if err != nil {
-		return err
+		return mutated, err
 	}
-	tx, err = store.db.BeginTx(ctx, nil)
+
+	tx, err := store.db.BeginTx(ctx, nil)
 	if err != nil {
-		return err
+		return mutated, err
 	}
 	defer tx.Rollback()
 	for id, count := range counts {
@@ -291,18 +366,20 @@ func (store *Store) scanDsh(ctx context.Context) error {
 				info.path = coalesce(info.path, member.path)
 			}
 		}
-		if err = saveConversation(ctx, tx, id, info.title, info.cwd, info.path, "", count > 1, true); err != nil {
-			return err
+		convChanged, convErr := saveConversation(ctx, tx, id, info.title, info.cwd, info.path, "", count > 1, true)
+		if convErr != nil {
+			return mutated, convErr
 		}
+		mutated = mutated || convChanged
 	}
-	return tx.Commit()
+	return mutated, tx.Commit()
 }
 
-func (store *Store) scanDshFile(ctx context.Context, path string, info fs.FileInfo, roots map[string]string) (scanState, error) {
+func (store *Store) scanDshFile(ctx context.Context, path string, info fs.FileInfo, roots map[string]string) (scanState, bool, error) {
 	state := scanState{Model: "unknown", Speed: "standard", Offset: info.Size()}
 	lines, err := dshLines(path)
 	if err != nil {
-		return state, err
+		return state, false, err
 	}
 	entries := map[string]model.UsageRow{}
 	routeProvider, routeModel := "", ""
@@ -317,7 +394,7 @@ func (store *Store) scanDshFile(ctx context.Context, path string, info fs.FileIn
 		}
 		root, parseErr := parse(line)
 		if parseErr != nil {
-			return state, parseErr
+			return state, false, parseErr
 		}
 		kind := str(root, "type")
 		body := obj(root, "data")
@@ -395,21 +472,46 @@ func (store *Store) scanDshFile(ctx context.Context, path string, info fs.FileIn
 		row.Cost = store.pricing.Cost(row)
 		entries[key] = row
 	}
-	tx, err := store.db.BeginTx(ctx, nil)
+	batch, err := store.beginWrite(ctx)
 	if err != nil {
-		return state, err
+		return state, false, err
 	}
-	defer tx.Rollback()
-	if _, err = tx.ExecContext(ctx, "DELETE FROM usage WHERE source=?", path); err != nil {
-		return state, err
-	}
-	for _, row := range entries {
-		if err = saveUsage(ctx, tx, row, path); err != nil {
-			return state, err
+	committed := false
+	defer func() {
+		if !committed {
+			batch.rollback()
+		}
+	}()
+	dir := filepath.Dir(path)
+	staleSources := []string{path}
+	store.dictMu.RLock()
+	for src := range store.sources {
+		if src != path && filepath.Dir(src) == dir && dshVersion.MatchString(filepath.Base(src)) {
+			staleSources = append(staleSources, src)
 		}
 	}
-	if err = saveState(ctx, tx, path, state, info); err != nil {
-		return state, err
+	store.dictMu.RUnlock()
+	for _, src := range staleSources {
+		if err = batch.deleteBySource(ctx, src); err != nil {
+			return state, false, err
+		}
+		if src != path {
+			if _, err = batch.tx.ExecContext(ctx, "DELETE FROM scan_file WHERE path=?", src); err != nil {
+				return state, false, err
+			}
+		}
 	}
-	return state, tx.Commit()
+	for _, row := range entries {
+		if err = batch.saveUsage(ctx, row, path); err != nil {
+			return state, false, err
+		}
+	}
+	if err = saveState(ctx, batch.tx, path, state, info); err != nil {
+		return state, false, err
+	}
+	if err = batch.commit(ctx); err != nil {
+		return state, false, err
+	}
+	committed = true
+	return state, batch.mutated, nil
 }

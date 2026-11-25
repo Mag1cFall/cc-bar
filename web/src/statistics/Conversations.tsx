@@ -9,7 +9,7 @@ import { useQuery } from '../hooks'
 import type { ConversationQuery, UsageQuery } from '../models'
 import { TokenBreakdown } from './shared'
 
-export default function Conversations({ query }: { query: UsageQuery }) {
+export default function Conversations({ query, active = true }: { query: UsageQuery; active?: boolean }) {
   const { tr, english, revision } = useApp()
   const [search, setSearch] = useState('')
   const [project, setProject] = useState('*')
@@ -35,7 +35,7 @@ export default function Conversations({ query }: { query: UsageQuery }) {
     offset,
     limit: 25,
   }
-  const result = useQuery(`${JSON.stringify(request)}:${revision}`, () => api.conversations(request))
+  const result = useQuery(`${JSON.stringify(request)}:${revision}`, () => api.conversations(request), active)
   const items = result.data?.items ?? []
   const selectedId = items.find((item) => item.id === selected)?.id ?? items[0]?.id
   const change = (action: () => void) => {
@@ -142,7 +142,7 @@ export default function Conversations({ query }: { query: UsageQuery }) {
         </div>
         <div className="conversation-detail">
           {selectedId ? (
-            <Details id={selectedId} />
+            <Details key={selectedId} id={selectedId} active={active} />
           ) : (
             <Empty title={tr('Select a conversation', '选择一个对话')} />
           )}
@@ -152,13 +152,19 @@ export default function Conversations({ query }: { query: UsageQuery }) {
   )
 }
 
-function Details({ id }: { id: string }) {
+const eventBatchSize = 200
+
+function Details({ id, active }: { id: string; active: boolean }) {
   const { tr, english, revision, run } = useApp()
   const [showEvents, setShowEvents] = useState(false)
-  const result = useQuery(`${id}:${revision}`, () => api.conversation(id))
+  const [visibleCount, setVisibleCount] = useState(eventBatchSize)
+  const result = useQuery(`${id}:${revision}`, () => api.conversation(id), active)
   const detail = result.data,
     item = detail?.conversation
   const totals = item?.totals
+  const allEvents = detail?.events ?? []
+  const shownEvents = allEvents.slice(0, visibleCount)
+  const remainingEvents = allEvents.length - shownEvents.length
   return (
     <>
       <QueryState pending={result.pending} error={result.error} />
@@ -278,7 +284,7 @@ function Details({ id }: { id: string }) {
                     </tr>
                   </thead>
                   <tbody>
-                    {(detail.events ?? []).map((event) => (
+                    {shownEvents.map((event) => (
                       <tr key={event.id}>
                         <td>{dateTime(event.time, english, true)}</td>
                         <td>
@@ -293,6 +299,19 @@ function Details({ id }: { id: string }) {
                     ))}
                   </tbody>
                 </table>
+                {remainingEvents > 0 && (
+                  <div className="pagination">
+                    <span>
+                      {shownEvents.length} / {allEvents.length}
+                    </span>
+                    <Button onClick={() => setVisibleCount((count) => count + eventBatchSize)}>
+                      {tr(
+                        `Load ${Math.min(eventBatchSize, remainingEvents)} more`,
+                        `再加载 ${Math.min(eventBatchSize, remainingEvents)} 条`,
+                      )}
+                    </Button>
+                  </div>
+                )}
               </Card>
             )}
           </Section>

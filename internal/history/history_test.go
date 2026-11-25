@@ -102,3 +102,98 @@ func TestAccountCycles(t *testing.T) {
 		t.Logf("只读真实历史: %d账号，%d周期，%d短窗日期/%d采样，%d周额度采样", len(existing.Keys()), len(existing.Cycles().Records), shortDates, shortEntries, weeklyEntries)
 	}
 }
+
+// TestRecordBatchAndFlush 验证批量记录与延迟采样在Flush后完整落盘
+func TestRecordBatchAndFlush(t *testing.T) {
+	dir := t.TempDir()
+	store, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	at := time.Now().Truncate(time.Second)
+	reset := at.Add(3 * time.Hour)
+	snap := model.QuotaSnapshot{App: model.Codex, PrimaryLimit: &model.QuotaLimit{
+		ID: "five-hour", Kind: model.FiveHour, Window: model.QuotaWindow{UsedPercent: 30, ResetsAt: &reset},
+	}}
+	if err = store.RecordBatch([]RecordInput{
+		{Key: "codex:imported:a", App: model.Codex, Snapshot: snap, Source: "api", At: at},
+		{Key: "codex:imported:b", App: model.Codex, Snapshot: snap, Source: "api", At: at},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err = store.Record("codex:imported:a", model.Codex, snap, "api", at.Add(time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	if err = store.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	reloaded, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(reloaded.Keys()) != 2 {
+		t.Fatalf("批量记录重载数量错误: %+v", reloaded.Keys())
+	}
+}
+
+// TestFlushSkipsCleanAndMarksCleanupDirty 验证无脏不重写与跨日清理正确标脏落盘
+func TestFlushSkipsCleanAndMarksCleanupDirty(t *testing.T) {
+	dir := t.TempDir()
+	store, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = store.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"quota-history.json", "quota-cycle-history.json"} {
+		if _, statErr := os.Stat(filepath.Join(dir, name)); !os.IsNotExist(statErr) {
+			t.Fatalf("空状态Flush不应创建文件 %s: %v", name, statErr)
+		}
+	}
+
+	at := time.Date(2026, 10, 1, 12, 0, 0, 0, time.Local)
+	reset := at.Add(3 * time.Hour)
+	snap := model.QuotaSnapshot{App: model.Codex, PrimaryLimit: &model.QuotaLimit{
+		ID: "five-hour", Kind: model.FiveHour, Window: model.QuotaWindow{UsedPercent: 25, ResetsAt: &reset},
+	}}
+	if err = store.Record("codex:primary:clean", model.Codex, snap, "api", at); err != nil {
+		t.Fatal(err)
+	}
+	if err = store.Flush(); err != nil {
+		t.Fatal(err)
+	}
+
+	past := time.Now().Add(-2 * time.Hour).Truncate(time.Second)
+	for _, name := range []string{"quota-history.json", "quota-cycle-history.json"} {
+		p := filepath.Join(dir, name)
+		if err = os.Chtimes(p, past, past); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err = store.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"quota-history.json", "quota-cycle-history.json"} {
+		info, statErr := os.Stat(filepath.Join(dir, name))
+		if statErr != nil {
+			t.Fatal(statErr)
+		}
+		if !info.ModTime().Equal(past) {
+			t.Fatalf("无脏Flush不应重写文件 %s: got=%v want=%v", name, info.ModTime(), past)
+		}
+	}
+
+	// 无limit的跨日采样也须将过期样本清理标脏并落盘
+	future := at.AddDate(0, 0, 20)
+	if err = store.Record("antigravity:primary:empty", model.Antigravity, model.QuotaSnapshot{App: model.Antigravity}, "api", future); err != nil {
+		t.Fatal(err)
+	}
+	reloaded, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(reloaded.Keys()) != 0 {
+		t.Fatalf("跨日清理过期采样未标脏落盘: %+v", reloaded.Keys())
+	}
+}

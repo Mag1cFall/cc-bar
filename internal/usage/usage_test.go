@@ -217,9 +217,22 @@ func TestUsageMigration(t *testing.T) {
 	if offset != info.Size()-int64(len("{\"type\":")) {
 		t.Fatalf("不完整行偏移错误 %d %d", offset, info.Size())
 	}
-	if _, err = store.db.Exec("INSERT INTO usage(event_key,source,app,conversation,model,speed,time,input,output,cache_read,cache_write,cost) VALUES('legacy','cursor:legacy',2,'cursor:daily','legacy-model','standard',?,1,2,3,4,0.75)", milliseconds); err != nil {
-		t.Fatal(err)
+	insertRow := func(row model.UsageRow, source string) {
+		t.Helper()
+		batch, bErr := store.beginWrite(ctx)
+		if bErr != nil {
+			t.Fatal(bErr)
+		}
+		if bErr = batch.saveUsage(ctx, row, source); bErr != nil {
+			batch.rollback()
+			t.Fatal(bErr)
+		}
+		if bErr = batch.commit(ctx); bErr != nil {
+			t.Fatal(bErr)
+		}
 	}
+	legacyCost := 0.75
+	insertRow(model.UsageRow{ID: "legacy", App: model.UsageCursor, Conversation: "cursor:daily", Model: "legacy-model", Speed: "standard", Time: at, Input: 1, Output: 2, CacheRead: 3, CacheWrite: 4, Cost: &legacyCost, Requests: 1}, "cursor:legacy")
 	if err = store.Scan(ctx, false); err != nil {
 		t.Fatal(err)
 	}
@@ -239,7 +252,7 @@ func TestUsageMigration(t *testing.T) {
 	if _, err = store.db.Exec("UPDATE scan_meta SET value=? WHERE name IN('opencode','opencode-updated')", milliseconds+100); err != nil {
 		t.Fatal(err)
 	}
-	if err = store.scanOpenCode(ctx); err != nil {
+	if _, err = store.scanOpenCode(ctx, false); err != nil {
 		t.Fatal(err)
 	}
 	openApp := model.UsageOpencode
@@ -252,21 +265,169 @@ func TestUsageMigration(t *testing.T) {
 	if err != nil || fast.Fast.MultiplierText != "2.5×" {
 		t.Fatalf("单一Fast倍率错误: %+v %v", fast.Fast, err)
 	}
-	if _, err = store.db.Exec(`INSERT INTO usage(event_key,source,app,conversation,model,speed,time,input,output,cache_read,cache_write,cost)
- VALUES('fast-claude','test',1,'test-fast','claude-opus-4-6','fast',?,10,20,0,0,0.1)`, milliseconds); err != nil {
-		t.Fatal(err)
-	}
+	fastCost := 0.1
+	insertRow(model.UsageRow{ID: "fast-claude", App: model.UsageClaude, Conversation: "test-fast", Model: "claude-opus-4-6", Speed: "fast", Time: at, Input: 10, Output: 20, Cost: &fastCost, Requests: 1}, "test")
 	fast, err = store.Overview(ctx, query)
 	if err != nil || fast.Fast.MultiplierText != "2.5–6×" {
 		t.Fatalf("混合Fast倍率错误: %+v %v", fast.Fast, err)
 	}
-	if _, err = store.db.Exec(`INSERT INTO usage(event_key,source,app,conversation,model,speed,time,input,output,cache_read,cache_write,cost)
- VALUES('fast-unknown','test',1,'test-fast','unknown','fast',?,10,20,0,0,NULL)`, milliseconds); err != nil {
-		t.Fatal(err)
-	}
+	insertRow(model.UsageRow{ID: "fast-unknown", App: model.UsageClaude, Conversation: "test-fast", Model: "unknown", Speed: "fast", Time: at, Input: 10, Output: 20, Requests: 1}, "test")
 	fast, err = store.Overview(ctx, query)
 	if err != nil || fast.Fast.MultiplierText != "—" || !fast.Fast.UnknownMultiplier {
 		t.Fatalf("未知Fast倍率错误: %+v %v", fast.Fast, err)
+	}
+}
+
+// TestSchemaV1ToV2Migration 验证旧版V1数据库无损幂等升级到V2及预聚合查询一致性
+func TestSchemaV1ToV2Migration(t *testing.T) {
+	ctx := context.Background()
+	dataDir := t.TempDir()
+	home := t.TempDir()
+	dbPath := filepath.Join(dataDir, "usage.db")
+
+	legacy, err := sql.Open("sqlite", "file:"+filepath.ToSlash(dbPath))
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacySchema := `
+CREATE TABLE usage (
+ event_key TEXT PRIMARY KEY,source TEXT NOT NULL,app INTEGER NOT NULL,
+ conversation TEXT NOT NULL,model TEXT NOT NULL,speed TEXT NOT NULL,time INTEGER NOT NULL,
+ input INTEGER NOT NULL,output INTEGER NOT NULL,cache_read INTEGER NOT NULL,
+ cache_write INTEGER NOT NULL,cost REAL,cache_write_1h INTEGER NOT NULL DEFAULT 0);
+CREATE INDEX usage_time ON usage(time,app);
+CREATE INDEX usage_app_time ON usage(app,time);
+CREATE INDEX usage_conversation ON usage(conversation);
+CREATE TABLE scan_file (
+ path TEXT PRIMARY KEY,length INTEGER NOT NULL,modified INTEGER NOT NULL,
+ offset INTEGER NOT NULL,model TEXT,speed TEXT,signature TEXT,
+ session TEXT,emitting TEXT,title TEXT,cwd TEXT,branch TEXT,
+ subtasks INTEGER NOT NULL DEFAULT 0,sidechain_all INTEGER);
+CREATE TABLE conversation (
+ id TEXT PRIMARY KEY,title TEXT,cwd TEXT,source TEXT,branch TEXT,
+ subtasks INTEGER NOT NULL DEFAULT 0,project TEXT,project_status TEXT,
+ cache_write_avail INTEGER NOT NULL DEFAULT 0);
+CREATE TABLE scan_meta(name TEXT PRIMARY KEY,value INTEGER NOT NULL);
+CREATE TABLE scan_blob(name TEXT PRIMARY KEY,value TEXT NOT NULL);
+CREATE TABLE scan_candidate(path TEXT NOT NULL,session TEXT NOT NULL,cwd TEXT NOT NULL,
+ sidechain INTEGER NOT NULL,PRIMARY KEY(path,session,cwd,sidechain));`
+	if _, err = legacy.Exec(legacySchema); err != nil {
+		t.Fatal(err)
+	}
+	t1 := time.Date(2026, 10, 1, 9, 7, 12, 0, time.Local)
+	t2 := time.Date(2026, 10, 1, 10, 20, 0, 0, time.Local)
+	t3 := time.Date(2026, 10, 2, 11, 35, 0, 0, time.Local)
+	if _, err = legacy.Exec(`
+INSERT INTO usage(event_key,source,app,conversation,model,speed,time,input,output,cache_read,cache_write,cost,cache_write_1h) VALUES
+ ('codex:s1#1','/tmp/codex1.jsonl',0,'codex:s1','gpt-5.4','standard',?,1000,200,500,0,0.05,0),
+ ('claude:m1','/tmp/claude1.jsonl',1,'claude:c1','claude-opus-4-6','fast',?,2000,300,100,50,NULL,20),
+ ('claude:m2','/tmp/claude1.jsonl',1,'claude:c1','claude-sonnet-4-6','standard',?,500,100,0,0,0.02,0),
+ ('omp:e1@ts','/tmp/omp1.jsonl',6,'omp:o1','wjkde/gpt-5.6-sol','standard',?,400,50,100,0,0.12,0),
+ ('dsh:root:1','/tmp/dsh1.zstd',5,'dsh:root','deepseek/deepseek-flash','standard',?,300,40,0,0,0.01,0);
+INSERT INTO scan_blob(name,value) VALUES
+ ('usage-cost:omp:e1@ts','{"input":0.08,"output":0.03,"cacheRead":0.01,"cacheWrite":0}'),
+ ('dsh_roots','{"root":"root"}');
+INSERT INTO conversation(id,title,cwd,source,branch,subtasks,project,project_status,cache_write_avail) VALUES
+ ('codex:s1','Codex标题','/proj/a','/tmp/codex1.jsonl','main',0,'/proj/a','available',0),
+ ('claude:c1','Claude跨日对话','/proj/b','/tmp/claude1.jsonl','dev',1,'/proj/b','available',1),
+ ('omp:o1','OMP会话','/proj/c','/tmp/omp1.jsonl','',0,'/proj/c','available',1);
+INSERT INTO scan_meta(name,value) VALUES('opencode',12345);`,
+		t1.UnixMilli(), t2.UnixMilli(), t3.UnixMilli(), t2.UnixMilli(), t3.UnixMilli()); err != nil {
+		t.Fatal(err)
+	}
+	if err = legacy.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	store, err := Open(dataDir, home)
+	if err != nil {
+		t.Fatalf("V1到V2迁移失败: %v", err)
+	}
+	var ver int
+	if err = store.db.QueryRow("PRAGMA user_version").Scan(&ver); err != nil || ver != currentSchemaVersion {
+		t.Fatalf("schema版本错误: %d %v", ver, err)
+	}
+	var leftBlobs int
+	if err = store.db.QueryRow("SELECT COUNT(*) FROM scan_blob WHERE name LIKE 'usage-cost:%'").Scan(&leftBlobs); err != nil || leftBlobs != 0 {
+		t.Fatalf("旧usage-cost未迁出scan_blob: %d %v", leftBlobs, err)
+	}
+	var dshBlob string
+	if err = store.db.QueryRow("SELECT value FROM scan_blob WHERE name='dsh_roots'").Scan(&dshBlob); err != nil || dshBlob != `{"root":"root"}` {
+		t.Fatalf("非usage-cost的scan_blob丢失: %q %v", dshBlob, err)
+	}
+
+	allTotals, err := store.Totals(ctx, nil, time.UnixMilli(0), t3.Add(time.Hour))
+	if err != nil || allTotals.Requests != 5 || allTotals.Input != 4200 || allTotals.Output != 690 || allTotals.CacheRead != 700 || allTotals.CacheWrite != 50 || allTotals.CacheWrite1h != 20 || math.Abs(allTotals.Cost-0.20) > 1e-9 {
+		t.Fatalf("迁移后总计不一致: %+v %v", allTotals, err)
+	}
+	// 非整15分钟边界查询必须与精确事件完全一致
+	edgeTotals, err := store.Totals(ctx, nil, t1.Add(-time.Second), t1.Add(time.Second))
+	if err != nil || edgeTotals.Requests != 1 || edgeTotals.Input != 1000 {
+		t.Fatalf("非对齐毫秒边界Totals不一致: %+v %v", edgeTotals, err)
+	}
+	// 跨日边界裁剪查询 Conversations
+	day1From := time.Date(2026, 10, 1, 0, 0, 0, 0, time.Local)
+	day1To := day1From.AddDate(0, 0, 1)
+	day1Convs, err := store.Conversations(ctx, model.ConversationQuery{From: day1From.Format(time.RFC3339), To: day1To.Format(time.RFC3339)})
+	if err != nil || day1Convs.Total != 3 {
+		t.Fatalf("边界裁剪对话数错误: %+v %v", day1Convs, err)
+	}
+	for _, item := range day1Convs.Items {
+		if item.ID == "claude:c1" && (item.Totals.Requests != 1 || item.Totals.Input != 2000 || item.Speed != "fast") {
+			t.Fatalf("跨日对话在单日内裁剪聚合错误: %+v", item)
+		}
+	}
+	// 验证 OMP 上报费用拆分已无损迁移至 usage_cost
+	ompDetail, err := store.Detail(ctx, "omp:o1")
+	if err != nil || math.Abs(ompDetail.Costs.Input-0.08) > 1e-9 || math.Abs(ompDetail.Costs.Output-0.03) > 1e-9 || math.Abs(ompDetail.Costs.CacheRead-0.01) > 1e-9 {
+		t.Fatalf("OMP上报费用迁移错误: %+v %v", ompDetail.Costs, err)
+	}
+	// 验证 PopoverCosts 单次预聚合查询
+	todayCosts, weekCosts, err := store.PopoverCosts(ctx, nil, day1To, day1From, day1To.AddDate(0, 0, 1))
+	if err != nil || math.Abs(todayCosts[model.UsageClaude]-0.02) > 1e-9 || math.Abs(weekCosts[model.UsageOmp]-0.12) > 1e-9 {
+		t.Fatalf("PopoverCosts汇总错误: today=%+v week=%+v err=%v", todayCosts, weekCosts, err)
+	}
+	// 验证 repriceMissing 通过部分索引更新 cost 并同步 usage_rollup 与 conv_summary
+	updated, err := store.repriceMissing(ctx)
+	if err != nil || !updated {
+		t.Fatalf("repriceMissing未补齐可定价记录: updated=%v err=%v", updated, err)
+	}
+	afterReprice, err := store.Totals(ctx, nil, time.UnixMilli(0), t3.Add(time.Hour))
+	if err != nil || afterReprice.Cost <= 0.20 {
+		t.Fatalf("repriceMissing后usage_rollup未同步: %+v %v", afterReprice, err)
+	}
+	claudeDetail, err := store.Detail(ctx, "claude:c1")
+	if err != nil || claudeDetail.Conversation.Totals.Cost <= 0.02 {
+		t.Fatalf("repriceMissing后conv_summary未同步: %+v %v", claudeDetail.Conversation, err)
+	}
+	// 验证再次写入相同 event_key 时 100% 幂等去重
+	batch, err := store.beginWrite(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dupCost := 9.99
+	if err = batch.saveUsage(ctx, model.UsageRow{ID: "codex:s1#1", App: model.UsageCodex, Conversation: "codex:s1", Model: "gpt-5.4", Speed: "standard", Time: t1, Input: 9999, Cost: &dupCost, Requests: 1}, "/tmp/codex1.jsonl"); err != nil {
+		batch.rollback()
+		t.Fatal(err)
+	}
+	if err = batch.commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if batch.mutated {
+		t.Fatal("重复event_key不应产生写入变更")
+	}
+	if err = store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	// 验证再次 Open 幂等
+	reopened, err := Open(dataDir, home)
+	if err != nil {
+		t.Fatalf("迁移后重复Open失败: %v", err)
+	}
+	defer reopened.Close()
+	checkTotals, err := reopened.Totals(ctx, nil, time.UnixMilli(0), t3.Add(time.Hour))
+	if err != nil || checkTotals != afterReprice {
+		t.Fatalf("重复Open后数据不一致: %+v vs %+v (%v)", checkTotals, afterReprice, err)
 	}
 }
 
@@ -348,5 +509,144 @@ func TestCursorPagination(t *testing.T) {
 	}
 	if len(rows) != 1001 || rows[1000].Input != 1001 || rows[0].Cost == nil || *rows[0].Cost != .125 {
 		t.Fatalf("Cursor分页/费用错误 %d", len(rows))
+	}
+}
+
+// TestEmptyConvSummaryAndIndexPlans 验证空对话汇总删除索引命中与字典并发兜底
+func TestEmptyConvSummaryAndIndexPlans(t *testing.T) {
+	ctx := context.Background()
+	store, err := Open(t.TempDir(), t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	at := time.Date(2026, 10, 5, 12, 0, 0, 0, time.Local)
+	batch, err := store.beginWrite(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = batch.saveUsage(ctx, model.UsageRow{
+		ID: "claude:null-check", App: model.UsageClaude, Conversation: "claude:empty-conv",
+		Model: "unpriced-model-x", Speed: "standard", Time: at, Input: 100, Output: 50, Requests: 1,
+	}, "/tmp/empty-check.jsonl"); err != nil {
+		batch.rollback()
+		t.Fatal(err)
+	}
+	if err = batch.commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	var modelID, speedID, sourceID int64
+	if err = store.db.QueryRowContext(ctx, "SELECT model_id,speed_id,source_id FROM usage LIMIT 1").Scan(&modelID, &speedID, &sourceID); err != nil {
+		t.Fatal(err)
+	}
+
+	queryPlan := func(sqlText string, args ...any) string {
+		t.Helper()
+		rows, qErr := store.db.QueryContext(ctx, "EXPLAIN QUERY PLAN "+sqlText, args...)
+		if qErr != nil {
+			t.Fatal(qErr)
+		}
+		defer rows.Close()
+		var parts []string
+		for rows.Next() {
+			var id, parent, notused int
+			var detail string
+			if sErr := rows.Scan(&id, &parent, &notused, &detail); sErr != nil {
+				t.Fatal(sErr)
+			}
+			parts = append(parts, detail)
+		}
+		if rErr := rows.Err(); rErr != nil {
+			t.Fatal(rErr)
+		}
+		return strings.Join(parts, "; ")
+	}
+
+	if plan := queryPlan("SELECT id,conv_id,time,input,output,cache_read,cache_write,cache_write_1h FROM usage WHERE cost IS NULL AND app<>2 AND app=? AND speed_id=? AND model_id=?", model.UsageClaude, speedID, modelID); !strings.Contains(plan, "usage_missing_cost") {
+		t.Fatalf("补价查询未命中部分索引 usage_missing_cost: %s", plan)
+	}
+	if plan := queryPlan("SELECT DISTINCT conv_id FROM usage WHERE source_id=?", sourceID); !strings.Contains(plan, "usage_source_idx") {
+		t.Fatalf("按来源查对话未命中 usage_source_idx: %s", plan)
+	}
+	if plan := queryPlan("DELETE FROM usage WHERE source_id=?", sourceID); !strings.Contains(plan, "usage_source_idx") {
+		t.Fatalf("按来源删除未命中 usage_source_idx: %s", plan)
+	}
+
+	// 清空本地快照与内存字典以验证 resolveDict 从数据库回填
+	store.dictMu.Lock()
+	delete(store.modelNames, modelID)
+	delete(store.speedNames, speedID)
+	store.dictMu.Unlock()
+	localModels, localSpeeds := map[int64]string{}, map[int64]string{}
+	gotModel, gotSpeed := store.resolveDict(ctx, modelID, speedID, localModels, localSpeeds)
+	if gotModel != "unpriced-model-x" || gotSpeed != "standard" || localModels[modelID] != "unpriced-model-x" || localSpeeds[speedID] != "standard" {
+		t.Fatalf("resolveDict回填失败: model=%q speed=%q", gotModel, gotSpeed)
+	}
+
+	// 清空对话后 refreshConvSummaries 不得因空聚合 NULL 报错回滚
+	delBatch, err := store.beginWrite(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = delBatch.deleteBySource(ctx, "/tmp/empty-check.jsonl"); err != nil {
+		delBatch.rollback()
+		t.Fatal(err)
+	}
+	if err = delBatch.commit(ctx); err != nil {
+		t.Fatalf("清空对话提交失败: %v", err)
+	}
+	var summaryCount int
+	if err = store.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM conv_summary").Scan(&summaryCount); err != nil || summaryCount != 0 {
+		t.Fatalf("空对话汇总未清除: count=%d err=%v", summaryCount, err)
+	}
+}
+
+// TestParseEdgeCases 验证Claude正文防误判Harness字符串message与引号毫秒时间戳
+func TestParseEdgeCases(t *testing.T) {
+	store := &Store{pricing: NewPricing(t.TempDir())}
+
+	state := scanState{Model: "unknown", Speed: "standard", Titles: map[string]string{}, Candidates: map[string][]projectCandidate{}}
+	userLine := []byte(`{"type":"user","sessionId":"s1","toolUseResult":{"isSidechain":true},"message":{"content":"排查解析逻辑"}}`)
+	if row := store.parseClaudeLine(userLine, &state); row != nil {
+		t.Fatalf("用户消息不应产出用量行: %+v", row)
+	}
+	if state.Subtasks {
+		t.Fatal("嵌套字段含 isSidechain:true 不应误判为子任务")
+	}
+	userLine2 := []byte(`{"type":"user","sessionId":"s2","slug":"tool_result","message":{"content":"排查工具结果标题"}}`)
+	if row := store.parseClaudeLine(userLine2, &state); row != nil || state.Titles["s2"] != "排查工具结果标题" {
+		t.Fatalf("普通用户标题含 tool_result 字样被误跳过: %q", state.Titles["s2"])
+	}
+
+	assistantLine := []byte(`{"type":"assistant","sessionId":"s1","cwd":"/proj","timestamp":"1760000000000","meta":{"isSidechain":true},"message":{"id":"m1","model":"claude-sonnet-4-6","stop_reason":"end_turn","usage":{"input_tokens":10,"output_tokens":5,"speed":"standard"}}}`)
+	row := store.parseClaudeLine(assistantLine, &state)
+	if row == nil || state.Subtasks || row.Time.UnixMilli() != 1760000000000 {
+		t.Fatalf("Claude助手行或引号毫秒时间戳解析错误: row=%+v subtasks=%v", row, state.Subtasks)
+	}
+
+	sidechainLine := []byte(`{"type":"assistant","isSidechain":true,"sessionId":"s1","cwd":"/proj","timestamp":"1760000000000","message":{"id":"m2","model":"claude-sonnet-4-6","stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":2,"speed":"standard"}}}`)
+	if store.parseClaudeLine(sidechainLine, &state) == nil || !state.Subtasks {
+		t.Fatal("真实顶层 isSidechain:true 未识别为子任务")
+	}
+
+	hState := scanState{Session: "h1", Model: "gpt-5.5", Speed: "standard"}
+	compactionLine := []byte(`{"type":"compaction","id":"c1","timestamp":"2026-09-20T13:00:00Z","provider":"openai","model":"gpt-5.5","message":"compacted summary","usage":{"input":100,"output":20,"cost":{"total":0.01}}}`)
+	cRow := store.parseHarnessLine(compactionLine, &hState, model.UsageOmp)
+	if cRow == nil || cRow.Input != 100 || cRow.Output != 20 {
+		t.Fatalf("compaction带字符串message被丢弃: %+v", cRow)
+	}
+
+	msgLine := []byte(`{"type":"message","id":"m2","timestamp":"2026-09-20T13:00:00Z","message":{"role":"assistant","provider":"openai","model":"gpt-5.5","timestamp":"1760000000000","usage":{"input":30,"output":10,"cost":{"total":0.005}}}}`)
+	mRow := store.parseHarnessLine(msgLine, &hState, model.UsagePi)
+	if mRow == nil || mRow.Time.UnixMilli() != 1760000000000 {
+		t.Fatalf("Harness引号毫秒时间戳解析错误: %+v", mRow)
+	}
+	if got := rawInt64(json.RawMessage(`"1760000000000"`)); got != 1760000000000 {
+		t.Fatalf("rawInt64引号数字解析错误: %d", got)
+	}
+	if got := parseRawTimestamp(json.RawMessage(`"1760000000000"`)).UnixMilli(); got != 1760000000000 {
+		t.Fatalf("parseRawTimestamp引号数字解析错误: %d", got)
 	}
 }

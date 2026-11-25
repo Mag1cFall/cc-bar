@@ -1,16 +1,17 @@
 import { useEffect, useRef, useState } from 'react'
-import { CancellablePromise, Window } from '@wailsio/runtime'
+import { Window } from '@wailsio/runtime'
 import { ArrowRightLeft, ChartColumn, LogOut, RefreshCw, Settings2 } from 'lucide-react'
 import { api } from './bridge'
 import { ActionMenu, Button, Empty, Logo, MenuItem, Progress, Quota, Status } from './components'
 import { useApp } from './context'
 import { dateBounds, dateTime, localDate, money, quotaKeys, quotaTone, remaining } from './format'
-import { useQuery } from './hooks'
+import { usePageVisible, useQuery } from './hooks'
 import type { Provider } from './models'
 
 // MiniWindows 共用主窗口的服务和账号数据并按内容调整原生窗口尺寸
 export default function MiniWindows({ mode }: { mode: 'popover' | 'hud' }) {
   const { snapshot, tr, run, busy, revision, save } = useApp()
+  const visible = usePageVisible()
   const surface = useRef<HTMLDivElement>(null)
   const [clock, setClock] = useState(Date.now)
   const providers = snapshot.providers.filter((provider) => {
@@ -18,19 +19,27 @@ export default function MiniWindows({ mode }: { mode: 'popover' | 'hud' }) {
     return display?.enabled && (mode !== 'hud' || display.floatingHud)
   })
   const now = new Date(clock)
+  const todayBounds = dateBounds('today', '', '', now)
+  const weekBounds = dateBounds('week', '', '', now)
   const usage = useQuery(
     `surface:${revision}:${localDate(now)}`,
-    () =>
-      CancellablePromise.all([
-        api.overview({ service: null, grain: 'day', ...dateBounds('today', '', '', now), compare: false }),
-        api.overview({ service: null, grain: 'day', ...dateBounds('week', '', '', now), compare: false }),
-      ]).then(([today, week]) => ({ today: today!, week: week! })),
-    mode === 'popover',
+    () => api.popoverUsage(todayBounds.from, weekBounds.from, todayBounds.to),
+    mode === 'popover' && visible,
   )
   useEffect(() => {
+    const syncOnShow = () => {
+      if (!document.hidden) setClock(Date.now())
+    }
+    document.addEventListener('visibilitychange', syncOnShow)
+    if (!visible) {
+      return () => document.removeEventListener('visibilitychange', syncOnShow)
+    }
     const timer = window.setInterval(() => setClock(Date.now()), 60_000)
-    return () => window.clearInterval(timer)
-  }, [])
+    return () => {
+      document.removeEventListener('visibilitychange', syncOnShow)
+      window.clearInterval(timer)
+    }
+  }, [visible])
   useEffect(() => {
     const element = surface.current
     if (!element) return
@@ -180,16 +189,8 @@ export default function MiniWindows({ mode }: { mode: 'popover' | 'hud' }) {
           <PopoverService
             key={provider.app}
             provider={provider}
-            today={
-              usageApp === null
-                ? undefined
-                : usage.data?.today.services?.find((service) => service.app === usageApp)?.totals.cost
-            }
-            week={
-              usageApp === null
-                ? undefined
-                : usage.data?.week.services?.find((service) => service.app === usageApp)?.totals.cost
-            }
+            today={usageApp === null ? undefined : usage.data?.today?.[String(usageApp)]}
+            week={usageApp === null ? undefined : usage.data?.week?.[String(usageApp)]}
           />
         )
       })}
@@ -272,10 +273,11 @@ function PopoverService({ provider, today, week }: { provider: Provider; today?:
           </ActionMenu>
         )}
       </div>
-      {identity && (
+      {(identity || provider.snapshot?.planType) && (
         <p className="popover-identity ellipsis" title={snapshot.settings.privacyMode ? undefined : identity}>
-          {snapshot.settings.privacyMode ? '••••@••••' : identity}
-          {provider.snapshot?.planType ? ` · ${provider.snapshot.planType}` : ''}
+          {identity ? (snapshot.settings.privacyMode ? '••••@••••' : identity) : ''}
+          {identity && provider.snapshot?.planType ? ' · ' : ''}
+          {provider.snapshot?.planType ?? ''}
         </p>
       )}
       {provider.snapshot ? (
@@ -293,11 +295,13 @@ function PopoverService({ provider, today, week }: { provider: Provider; today?:
                 title={
                   provider.app === 3
                     ? 'TOTAL'
-                    : provider.snapshot.primaryLimit?.kind === 1
-                      ? tr('Weekly', '周额度')
-                      : provider.snapshot.primaryLimit?.kind === 0
-                        ? '5H'
-                        : (provider.snapshot.primaryLimit?.displayName ?? tr('Quota', '额度'))
+                    : provider.app === 2 && provider.snapshot.primaryLimit?.displayName
+                      ? provider.snapshot.primaryLimit.displayName
+                      : provider.snapshot.primaryLimit?.kind === 1
+                        ? tr('Weekly', '周额度')
+                        : provider.snapshot.primaryLimit?.kind === 0
+                          ? '5H'
+                          : (provider.snapshot.primaryLimit?.displayName ?? tr('Quota', '额度'))
                 }
                 compact
               />
@@ -309,7 +313,9 @@ function PopoverService({ provider, today, week }: { provider: Provider; today?:
               title={
                 provider.app === 3
                   ? (provider.snapshot.secondaryLimit.displayName ?? 'AUTO')
-                  : tr('Weekly', '周额度')
+                  : provider.app === 2 && provider.snapshot.secondaryLimit.displayName
+                    ? provider.snapshot.secondaryLimit.displayName
+                    : tr('Weekly', '周额度')
               }
               compact
             />

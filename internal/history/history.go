@@ -16,6 +16,8 @@ import (
 	"github.com/Mag1cFall/cc-bar/internal/model"
 )
 
+const sampleFlushInterval = 10 * time.Minute
+
 // Sample 表示一条额度采样
 type Sample struct {
 	AccountKey       string          `json:"accountKey"`
@@ -64,6 +66,15 @@ type Period struct {
 	TotalDelta int       `json:"totalDelta"`
 }
 
+// RecordInput 表示批量写入的单条账号额度采样
+type RecordInput struct {
+	Key      string
+	App      model.QuotaApp
+	Snapshot model.QuotaSnapshot
+	Source   string
+	At       time.Time
+}
+
 type historyPayload struct {
 	Version     int               `json:"version"`
 	DayStart    time.Time         `json:"dayStart"`
@@ -71,18 +82,25 @@ type historyPayload struct {
 	Events      []Change          `json:"events"`
 }
 
-// Store 持久化额度时间线及周期边界
+// Store 持久化额度时间线及周期边界并按文件粒度去重写盘
 type Store struct {
-	mu        sync.Mutex
-	directory string
-	history   historyPayload
-	cycles    CyclePayload
+	mu              sync.RWMutex
+	directory       string
+	history         historyPayload
+	cycles          CyclePayload
+	historyDirty    bool
+	cyclesDirty     bool
+	lastHistorySave time.Time
+	lastCyclesSave  time.Time
 }
 
 // Open 读取现存历史文件并保留原有账号分区
 func Open(directory string) (*Store, error) {
-	store := &Store{directory: directory, history: historyPayload{Version: 3, LastSamples: map[string]Sample{}, Events: []Change{}},
-		cycles: CyclePayload{Version: 4, TrackingStartedAt: time.Now(), Records: []CycleRecord{}, AccountSegments: []AccountSegment{}}}
+	store := &Store{
+		directory: directory,
+		history:   historyPayload{Version: 3, LastSamples: map[string]Sample{}, Events: []Change{}},
+		cycles:    CyclePayload{Version: 4, TrackingStartedAt: time.Now(), Records: []CycleRecord{}, AccountSegments: []AccountSegment{}},
+	}
 	for _, file := range []struct {
 		name  string
 		value any
@@ -137,6 +155,7 @@ func identityKey(value string) string {
 	sum := sha256.Sum256([]byte(strings.ToLower(strings.TrimSpace(value))))
 	return hex.EncodeToString(sum[:])
 }
+
 func kindName(kind model.LimitKind) string {
 	if kind == model.FiveHour {
 		return "FiveHour"
@@ -146,10 +165,13 @@ func kindName(kind model.LimitKind) string {
 	}
 	return "Unknown"
 }
+
 func seriesKey(key string, kind model.LimitKind) string { return key + "|" + kindName(kind) }
+
 func sameWindow(a, b *time.Time) bool {
 	return a == nil || b == nil || math.Abs(a.Sub(*b).Seconds()) <= 1800
 }
+
 func accountKind(key string) string {
 	if strings.HasPrefix(key, "claude") {
 		return "claudePrimary"
@@ -163,16 +185,28 @@ func accountKind(key string) string {
 	return "codexPrimary"
 }
 
-// Record 将服务采样写入独立账号时间线
-func (store *Store) Record(key string, app model.QuotaApp, snapshot model.QuotaSnapshot, source string, at time.Time) error {
-	if key == "" {
-		return nil
+func equalReset(a, b *time.Time) bool {
+	if a == nil && b == nil {
+		return true
 	}
-	store.mu.Lock()
-	defer store.mu.Unlock()
+	if a == nil || b == nil {
+		return false
+	}
+	return a.Equal(*b)
+}
+
+func (store *Store) recordLocked(key string, app model.QuotaApp, snapshot model.QuotaSnapshot, source string, at time.Time) (historyUrgent bool, cyclesUrgent bool) {
+	if key == "" {
+		return false, false
+	}
 	start := time.Date(at.Year(), at.Month(), at.Day(), 0, 0, 0, 0, at.Location())
-	store.history.DayStart = start
+	if !store.history.DayStart.Equal(start) {
+		store.history.DayStart = start
+		store.historyDirty = true
+		historyUrgent = true
+	}
 	cutoff := start.AddDate(0, 0, -14)
+	beforeEvents := len(store.history.Events)
 	kept := store.history.Events[:0]
 	for _, event := range store.history.Events {
 		if !event.SampledAt.Before(cutoff) {
@@ -180,9 +214,15 @@ func (store *Store) Record(key string, app model.QuotaApp, snapshot model.QuotaS
 		}
 	}
 	store.history.Events = kept
+	if len(kept) != beforeEvents {
+		store.historyDirty = true
+		historyUrgent = true
+	}
 	for series, sample := range store.history.LastSamples {
 		if sample.SampledAt.Before(cutoff) {
 			delete(store.history.LastSamples, series)
+			store.historyDirty = true
+			historyUrgent = true
 		}
 	}
 	for _, limit := range []*model.QuotaLimit{snapshot.PrimaryLimit, snapshot.SecondaryLimit} {
@@ -192,6 +232,9 @@ func (store *Store) Record(key string, app model.QuotaApp, snapshot model.QuotaS
 		series := seriesKey(key, limit.Kind)
 		previous, found := store.history.LastSamples[series]
 		remaining := int(math.Round(math.Max(0, math.Min(100, 100-limit.Window.UsedPercent))))
+		if !found || previous.RemainingPercent != remaining || previous.LimitID != limit.ID || !equalReset(previous.ResetsAt, limit.Window.ResetsAt) {
+			historyUrgent = true
+		}
 		if found && (previous.LimitID != limit.ID || previous.LimitKind != limit.Kind) {
 			filtered := store.history.Events[:0]
 			for _, event := range store.history.Events {
@@ -203,6 +246,7 @@ func (store *Store) Record(key string, app model.QuotaApp, snapshot model.QuotaS
 			found = false
 		}
 		store.history.LastSamples[series] = Sample{key, app, accountKind(key), at, limit.ID, limit.Kind, remaining, limit.Window.ResetsAt}
+		store.historyDirty = true
 		if found {
 			for index := len(store.history.Events) - 1; index >= 0; index-- {
 				tail := store.history.Events[index]
@@ -217,6 +261,7 @@ func (store *Store) Record(key string, app model.QuotaApp, snapshot model.QuotaS
 		}
 		if found && previous.RemainingPercent != remaining && sameWindow(previous.ResetsAt, limit.Window.ResetsAt) {
 			store.history.Events = append(store.history.Events, Change{fmt.Sprintf("%s|%s|%d|%d|%d", key, limit.ID, at.Unix(), previous.RemainingPercent, remaining), key, app, accountKind(key), at, limit.ID, limit.Kind, previous.RemainingPercent, remaining, remaining - previous.RemainingPercent, limit.Window.ResetsAt})
+			historyUrgent = true
 		}
 	}
 	if (app == model.Codex || app == model.Claude) && !strings.HasPrefix(key, "codex:imported:") {
@@ -224,15 +269,45 @@ func (store *Store) Record(key string, app model.QuotaApp, snapshot model.QuotaS
 		if app == model.Claude {
 			usageApp = model.UsageClaude
 		}
-		store.recordCycles(key, usageApp, snapshot, source, at)
+		if store.recordCycles(key, usageApp, snapshot, source, at) {
+			cyclesUrgent = true
+		}
+		store.cyclesDirty = true
 	}
-	return store.save()
+	return historyUrgent, cyclesUrgent
+}
+
+// Record 将服务采样写入独立账号时间线并按需落盘
+func (store *Store) Record(key string, app model.QuotaApp, snapshot model.QuotaSnapshot, source string, at time.Time) error {
+	if key == "" {
+		return nil
+	}
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	historyUrgent, cyclesUrgent := store.recordLocked(key, app, snapshot, source, at)
+	return store.saveIfNeeded(historyUrgent, cyclesUrgent)
+}
+
+// RecordBatch 批量写入多账号采样并合并为至多一次磁盘持久化
+func (store *Store) RecordBatch(entries []RecordInput) error {
+	if len(entries) == 0 {
+		return nil
+	}
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	historyUrgent, cyclesUrgent := false, false
+	for _, entry := range entries {
+		h, c := store.recordLocked(entry.Key, entry.App, entry.Snapshot, entry.Source, entry.At)
+		historyUrgent = historyUrgent || h
+		cyclesUrgent = cyclesUrgent || c
+	}
+	return store.saveIfNeeded(historyUrgent, cyclesUrgent)
 }
 
 // Periods 返回当天或本周期与上一周期的时间线
 func (store *Store) Periods(key string, kind model.LimitKind, now time.Time) []Period {
-	store.mu.Lock()
-	defer store.mu.Unlock()
+	store.mu.RLock()
+	defer store.mu.RUnlock()
 	events := []Change{}
 	for _, event := range store.history.Events {
 		if event.AccountKey == key && event.LimitKind == kind {
@@ -332,8 +407,8 @@ func makePeriod(key string, kind int, start, end time.Time, changes []Change, sa
 
 // Keys 返回已有额度分区
 func (store *Store) Keys() []string {
-	store.mu.Lock()
-	defer store.mu.Unlock()
+	store.mu.RLock()
+	defer store.mu.RUnlock()
 	keys := map[string]bool{}
 	for _, sample := range store.history.LastSamples {
 		keys[sample.AccountKey] = true
@@ -341,7 +416,7 @@ func (store *Store) Keys() []string {
 	for _, event := range store.history.Events {
 		keys[event.AccountKey] = true
 	}
-	result := []string{}
+	result := make([]string, 0, len(keys))
 	for key := range keys {
 		result = append(result, key)
 	}
@@ -349,29 +424,58 @@ func (store *Store) Keys() []string {
 	return result
 }
 
-func (store *Store) save() error {
+func (store *Store) writeFile(name string, value any) error {
 	if err := os.MkdirAll(store.directory, 0700); err != nil {
 		return err
 	}
-	for _, file := range []struct {
-		name  string
-		value any
-	}{{"quota-history.json", store.history}, {"quota-cycle-history.json", store.cycles}} {
-		encoded, err := json.Marshal(file.value)
-		if err != nil {
+	encoded, err := json.Marshal(value)
+	if err != nil {
+		return err
+	}
+	path := filepath.Join(store.directory, name)
+	temporary := path + ".tmp"
+	if err = os.WriteFile(temporary, encoded, 0600); err != nil {
+		return err
+	}
+	return os.Rename(temporary, path)
+}
+
+func (store *Store) saveIfNeeded(historyUrgent, cyclesUrgent bool) error {
+	now := time.Now()
+	if store.historyDirty && (historyUrgent || store.lastHistorySave.IsZero() || now.Sub(store.lastHistorySave) >= sampleFlushInterval) {
+		if err := store.writeFile("quota-history.json", store.history); err != nil {
 			return err
 		}
-		path := filepath.Join(store.directory, file.name)
-		temporary := path + ".tmp"
-		if err = os.WriteFile(temporary, encoded, 0600); err != nil {
+		store.historyDirty = false
+		store.lastHistorySave = now
+	}
+	if store.cyclesDirty && (cyclesUrgent || store.lastCyclesSave.IsZero() || now.Sub(store.lastCyclesSave) >= sampleFlushInterval) {
+		if err := store.writeFile("quota-cycle-history.json", store.cycles); err != nil {
 			return err
 		}
-		if err = os.Rename(temporary, path); err != nil {
-			return err
-		}
+		store.cyclesDirty = false
+		store.lastCyclesSave = now
 	}
 	return nil
 }
 
-// Flush 写入当前的历史采样
-func (store *Store) Flush() error { store.mu.Lock(); defer store.mu.Unlock(); return store.save() }
+// Flush 将内存中的未落盘历史与周期状态原子写入磁盘
+func (store *Store) Flush() error {
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	if store.historyDirty {
+		if err := store.writeFile("quota-history.json", store.history); err != nil {
+			return err
+		}
+		store.historyDirty = false
+		store.lastHistorySave = time.Now()
+	}
+	if store.cyclesDirty {
+		if err := store.writeFile("quota-cycle-history.json", store.cycles); err != nil {
+			return err
+		}
+		store.cyclesDirty = false
+		store.lastCyclesSave = time.Now()
+	}
+	return nil
+}

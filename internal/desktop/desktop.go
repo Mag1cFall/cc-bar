@@ -269,6 +269,7 @@ func (host *Host) PresentMain() {
 		host.main.Show()
 	}
 	host.main.Focus()
+	setSurfaceVisibility(host.main, true)
 	hideSurface(host.popover)
 }
 
@@ -283,6 +284,7 @@ func (host *Host) togglePopover() {
 	}
 	_ = host.tray.PositionWindow(host.popover, 6)
 	host.popover.Show().Focus()
+	setSurfaceVisibility(host.popover, true)
 }
 
 // ApplySettings 更新登录启动与悬浮窗显示
@@ -306,8 +308,10 @@ func (host *Host) applyHUD(settings model.Settings) {
 			host.placeHud()
 		}
 		host.hud.Show()
+		setSurfaceVisibility(host.hud, true)
 	} else {
 		host.hud.Hide()
+		setSurfaceVisibility(host.hud, false)
 	}
 }
 

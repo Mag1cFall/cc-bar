@@ -5,6 +5,7 @@ import (
 	"errors"
 	"math"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -35,7 +36,29 @@ type CyclesView struct {
 	Records           []CycleView `json:"records"`
 }
 
-// GetCycles 将用量按实际登录区间归属到额度周期
+// sameIntervals 比较两段归属时间区间是否完全一致以避免重复查库
+func sameIntervals(left, right []usage.Interval) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for i := range left {
+		if !left[i].From.Equal(right[i].From) || !left[i].To.Equal(right[i].To) {
+			return false
+		}
+	}
+	return true
+}
+
+// cycleCacheKey 生成已完成历史周期在当前用量版本下的稳定缓存键
+func cycleCacheKey(record history.CycleRecord, segmentCount int) string {
+	last := int64(0)
+	if record.LastSampleAt != nil {
+		last = record.LastSampleAt.UnixNano()
+	}
+	return record.ID + "|" + record.StartAt.Format(time.RFC3339Nano) + "|" + record.EndAt.Format(time.RFC3339Nano) + "|" + strconv.FormatInt(last, 10) + "|" + strconv.Itoa(len(record.AllowanceSegments)) + "|" + strconv.Itoa(segmentCount)
+}
+
+// GetCycles 将用量按实际登录区间归属到额度周期并缓存已完成历史周期
 func (service *Service) GetCycles(ctx context.Context) (result CyclesView, err error) {
 	defer func() {
 		if errors.Is(err, context.Canceled) {
@@ -43,7 +66,7 @@ func (service *Service) GetCycles(ctx context.Context) (result CyclesView, err e
 		}
 	}()
 	payload := service.history.Cycles()
-	result = CyclesView{TrackingStartedAt: payload.TrackingStartedAt, Records: []CycleView{}}
+	result = CyclesView{TrackingStartedAt: payload.TrackingStartedAt, Records: make([]CycleView, 0, len(payload.Records))}
 	now := time.Now()
 	activeAccounts := map[string]bool{}
 	service.mu.RLock()
@@ -53,14 +76,38 @@ func (service *Service) GetCycles(ctx context.Context) (result CyclesView, err e
 		}
 	}
 	service.mu.RUnlock()
+
+	usageRev := service.usage.Status().Revision
+	service.cyclesCacheMu.Lock()
+	if service.cyclesCache == nil || service.cyclesCacheRev != usageRev {
+		service.cyclesCache = map[string]CycleView{}
+		service.cyclesCacheRev = usageRev
+	}
+	service.cyclesCacheMu.Unlock()
+
 	for _, record := range payload.Records {
+		isCurrent := !now.Before(record.StartAt) && now.Before(record.EndAt)
+		isFinished := !now.Before(record.EndAt)
+		isActive := activeAccounts[record.AccountKey]
+		if isFinished && !strings.HasPrefix(record.AccountKey, "codex:imported:") {
+			key := cycleCacheKey(record, len(payload.AccountSegments))
+			service.cyclesCacheMu.Lock()
+			cached, hit := service.cyclesCache[key]
+			service.cyclesCacheMu.Unlock()
+			if hit {
+				cached.IsCurrent = false
+				cached.IsActiveAccount = isActive
+				result.Records = append(result.Records, cached)
+				continue
+			}
+		}
 		view := CycleView{
 			CycleRecord:              record,
 			ExtraResetCount:          record.ExtraResets(),
 			TotalObservedUsedPercent: record.ObservedUsed(),
 			ReportedUsedPercent:      record.ReportedUsed(),
-			IsCurrent:                !now.Before(record.StartAt) && now.Before(record.EndAt),
-			IsActiveAccount:          activeAccounts[record.AccountKey],
+			IsCurrent:                isCurrent,
+			IsActiveAccount:          isActive,
 		}
 		if !strings.HasPrefix(record.AccountKey, "codex:imported:") {
 			end := record.EndAt
@@ -68,7 +115,6 @@ func (service *Service) GetCycles(ctx context.Context) (result CyclesView, err e
 				end = now.Add(time.Millisecond)
 			}
 			intervals := accountIntervals(record.StartAt, end, record, payload.AccountSegments)
-			var err error
 			view.LocalTotals, err = service.usage.TotalsInIntervals(ctx, record.App, intervals)
 			if err != nil {
 				return result, err
@@ -80,16 +126,36 @@ func (service *Service) GetCycles(ctx context.Context) (result CyclesView, err e
 					start = allowance.FirstSampleAt
 				}
 				observedIntervals := accountIntervals(start, allowance.LastSampleAt.Add(time.Millisecond), record, payload.AccountSegments)
-				observed, readErr := service.usage.TotalsInIntervals(ctx, record.App, observedIntervals)
-				if readErr != nil {
-					return result, readErr
+				var observed model.UsageTotals
+				if sameIntervals(observedIntervals, intervals) {
+					observed = view.LocalTotals
+				} else {
+					observed, err = service.usage.TotalsInIntervals(ctx, record.App, observedIntervals)
+					if err != nil {
+						return result, err
+					}
 				}
 				allowanceIntervals := accountIntervals(allowance.StartAt, end, record, payload.AccountSegments)
-				currentAllowance, readErr := service.usage.TotalsInIntervals(ctx, record.App, allowanceIntervals)
-				if readErr != nil {
-					return result, readErr
+				var currentAllowance model.UsageTotals
+				if sameIntervals(allowanceIntervals, intervals) {
+					currentAllowance = view.LocalTotals
+				} else if sameIntervals(allowanceIntervals, observedIntervals) {
+					currentAllowance = observed
+				} else {
+					currentAllowance, err = service.usage.TotalsInIntervals(ctx, record.App, allowanceIntervals)
+					if err != nil {
+						return result, err
+					}
 				}
 				setCycleForecast(&view, observed, currentAllowance, allowance)
+			}
+			if isFinished {
+				key := cycleCacheKey(record, len(payload.AccountSegments))
+				service.cyclesCacheMu.Lock()
+				if service.cyclesCacheRev == usageRev {
+					service.cyclesCache[key] = view
+				}
+				service.cyclesCacheMu.Unlock()
 			}
 		}
 		result.Records = append(result.Records, view)
@@ -97,7 +163,6 @@ func (service *Service) GetCycles(ctx context.Context) (result CyclesView, err e
 	sort.SliceStable(result.Records, func(i, j int) bool { return result.Records[i].StartAt.After(result.Records[j].StartAt) })
 	return result, nil
 }
-
 // accountIntervals 合并同一账号与额度周期重叠的实际使用区间
 func accountIntervals(from, to time.Time, record history.CycleRecord, segments []history.AccountSegment) []usage.Interval {
 	intervals := []usage.Interval{}

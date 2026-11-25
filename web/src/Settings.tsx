@@ -345,7 +345,7 @@ function ServiceRow({ provider, action }: { provider: Provider; action?: () => v
     provider.account?.login ??
     provider.account?.accountUuid ??
     provider.account?.accountId ??
-    tr('Not detected', '未检测到')
+    (provider.account ? tr('Signed in', '已登录') : tr('Not detected', '未检测到'))
   const plan = provider.snapshot?.planType ?? provider.account?.subscriptionType
   const label =
     provider.app === 0

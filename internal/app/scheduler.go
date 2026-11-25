@@ -54,6 +54,7 @@ func (service *Service) schedule() {
 	lastQuota, lastUsage, lastForcedScan := time.Now(), time.Now(), time.Now()
 	lastStatus := time.Time{}
 	lastPrices := time.Time{}
+	lastNetworkCheck := time.Now()
 	previousNetwork := networkState()
 	for {
 		select {
@@ -72,11 +73,14 @@ func (service *Service) schedule() {
 				quotaInterval *= 4
 				usageInterval *= 4
 			}
-			currentNetwork := networkState()
-			if currentNetwork != previousNetwork && currentNetwork != "" {
-				lastQuota = time.Time{}
+			if now.Sub(lastNetworkCheck) >= 30*time.Second {
+				lastNetworkCheck = now
+				currentNetwork := networkState()
+				if currentNetwork != previousNetwork && currentNetwork != "" {
+					lastQuota = time.Time{}
+				}
+				previousNetwork = currentNetwork
 			}
-			previousNetwork = currentNetwork
 			if now.Sub(lastQuota) >= quotaInterval {
 				lastQuota = now
 				service.background(service.refresh)
@@ -96,7 +100,6 @@ func (service *Service) schedule() {
 					if err := service.usage.RefreshPricingIfNeeded(service.ctx); err != nil {
 						service.logger.Debug("价格目录更新失败", "error", err)
 					}
-					service.changed()
 				})
 			}
 		}
@@ -116,6 +119,22 @@ func (service *Service) refreshStatuses() {
 		service.logger.Debug("服务状态刷新失败", "error", err)
 	}
 	service.changed()
+}
+
+var ignoredWatchDirs = map[string]bool{
+	"debug": true, "todos": true, "file-history": true, "shell-snapshots": true,
+	"plugins": true, "cache": true, "tmp": true, "log": true, "logs": true,
+	"statsig": true, "ide": true, "downloads": true,
+}
+
+// isRelevantLogEvent 仅对日志或数据库源文件事件触发后台增量扫描
+func isRelevantLogEvent(path string) bool {
+	lower := strings.ToLower(filepath.Base(path))
+	return strings.HasSuffix(lower, ".jsonl") ||
+		strings.HasSuffix(lower, ".zstd") ||
+		lower == "opencode.db" ||
+		lower == "opencode.db-wal" ||
+		lower == "opencode.db-shm"
 }
 
 func (service *Service) watchLogs() {
@@ -152,6 +171,9 @@ func (service *Service) watchLogs() {
 				return fs.SkipDir
 			}
 			if entry.IsDir() {
+				if path != root && ignoredWatchDirs[strings.ToLower(entry.Name())] {
+					return fs.SkipDir
+				}
 				_ = watcher.Add(path)
 			}
 			return nil
@@ -180,9 +202,6 @@ func (service *Service) watchLogs() {
 			if !relevant {
 				continue
 			}
-			if event.Has(fsnotify.Write) || event.Has(fsnotify.Create) || event.Has(fsnotify.Rename) || event.Has(fsnotify.Remove) {
-				service.dirty.Store(true)
-			}
 			if event.Has(fsnotify.Remove) || event.Has(fsnotify.Rename) {
 				if restoreErr := service.accounts.RestoreSharedDirectory(event.Name); restoreErr != nil {
 					service.logger.Warn("Claude 共享记录目录重建失败", "path", event.Name, "error", restoreErr)
@@ -190,8 +209,15 @@ func (service *Service) watchLogs() {
 			}
 			if event.Has(fsnotify.Create) {
 				if info, statErr := os.Stat(event.Name); statErr == nil && info.IsDir() {
-					watchDirectory(event.Name)
+					if !ignoredWatchDirs[strings.ToLower(filepath.Base(event.Name))] {
+						watchDirectory(event.Name)
+						service.dirty.Store(true)
+					}
+					continue
 				}
+			}
+			if (event.Has(fsnotify.Write) || event.Has(fsnotify.Create) || event.Has(fsnotify.Rename) || event.Has(fsnotify.Remove)) && isRelevantLogEvent(event.Name) {
+				service.dirty.Store(true)
 			}
 		case watchErr, open := <-watcher.Errors:
 			if !open {

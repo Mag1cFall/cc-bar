@@ -54,6 +54,21 @@ func prepareSurface(window *application.WebviewWindow, hidden bool) {
 		var disabled int32
 		_, _, _ = setWindowAttribute.Call(handle, dwmCloak, uintptr(unsafe.Pointer(&disabled)), unsafe.Sizeof(disabled))
 	})
+	if hidden {
+		setSurfaceVisibility(window, false)
+	}
+}
+
+// setSurfaceVisibility 将原生窗口可见态同步给 WebView2 页面
+func setSurfaceVisibility(window *application.WebviewWindow, visible bool) {
+	if window == nil {
+		return
+	}
+	if visible {
+		window.ExecJS("window.__ccbarVisible=true;window.dispatchEvent(new Event('ccbar:visibility'))")
+	} else {
+		window.ExecJS("window.__ccbarVisible=false;window.dispatchEvent(new Event('ccbar:visibility'))")
+	}
 }
 
 // hideSurface 收起原生窗口并保留 WebView2 已渲染的页面
@@ -61,6 +76,7 @@ func hideSurface(window *application.WebviewWindow) {
 	application.InvokeSync(func() {
 		_, _, _ = showNativeWindow.Call(uintptr(window.NativeWindow()), windows.SW_HIDE)
 	})
+	setSurfaceVisibility(window, false)
 }
 
 func platformOptions(service *app.Service) application.WindowsOptions {

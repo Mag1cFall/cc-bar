@@ -343,36 +343,109 @@ func ReadCursor(path string) (*model.Credential, error) {
 	return &model.Credential{AccessToken: token, Source: "Cursor", AccountID: userID, Email: str(claims, "email"), ExpiresAt: expiry}, nil
 }
 
-// ReadAntigravity 沿用官方客户端的令牌来源顺序
+// ReadAntigravity 按官方客户端与 agy CLI 顺序读取本机凭据
 func ReadAntigravity(home string) (*model.Credential, error) {
-	for _, name := range []string{"jetski-standalone-oauth-token", "oauth_creds.json"} {
-		path := filepath.Join(home, ".gemini", name)
+	jetskiPath := filepath.Join(home, ".gemini", "jetski-standalone-oauth-token")
+	cliPath := filepath.Join(home, ".gemini", "antigravity-cli", "antigravity-oauth-token")
+	oauthPath := filepath.Join(home, ".gemini", "oauth_creds.json")
+	preferFile := false
+	if info, err := os.Stat(filepath.Join(home, ".gemini", "cache", "antigravity-keyring-unavailable")); err == nil && time.Since(info.ModTime()) < time.Hour {
+		preferFile = true
+	}
+	var firstErr error
+	readFile := func(path string) *model.Credential {
 		root, err := readObject(path)
 		if os.IsNotExist(err) {
+			return nil
+		}
+		if err != nil {
+			if firstErr == nil {
+				firstErr = err
+			}
+			return nil
+		}
+		return parseAntigravityCredential(root, path)
+	}
+	readKeyring := func() *model.Credential {
+		data, err := readAntigravityKeyring()
+		if err != nil || len(data) == 0 {
+			return nil
+		}
+		root, decodeErr := DecodeObject(data)
+		if decodeErr != nil {
+			if firstErr == nil {
+				firstErr = decodeErr
+			}
+			return nil
+		}
+		return parseAntigravityCredential(root, antigravityKeyringSource)
+	}
+	if preferFile {
+		if credential := readFile(jetskiPath); credential != nil {
+			return credential, nil
+		}
+	}
+	if credential := readKeyring(); credential != nil {
+		return credential, nil
+	}
+	for _, path := range []string{jetskiPath, cliPath, oauthPath} {
+		if preferFile && path == jetskiPath {
 			continue
 		}
+		if credential := readFile(path); credential != nil {
+			return credential, nil
+		}
+	}
+	return nil, firstErr
+}
+
+// readAntigravityRaw 按凭据来源读取原始 JSON 对象
+func readAntigravityRaw(source string) (object, error) {
+	if source == "" {
+		return nil, os.ErrNotExist
+	}
+	if source == antigravityKeyringSource {
+		data, err := readAntigravityKeyring()
 		if err != nil {
 			return nil, err
 		}
-		body := root
-		if nested := obj(root["token"]); name == "jetski-standalone-oauth-token" && nested != nil {
-			body = nested
+		if len(data) == 0 {
+			return nil, os.ErrNotExist
 		}
-		access, refresh := str(body, "access_token", "accessToken"), str(body, "refresh_token", "refreshToken")
-		if access == "" && refresh == "" {
-			continue
-		}
-		expiry := date(body["expiry_date"])
-		if value := date(body["expiry"]); value != nil {
-			expiry = value
-		}
-		email := str(root, "email")
-		if email == "" {
-			email = Claim(str(root, "id_token"), "email")
-		}
-		return &model.Credential{AccessToken: access, RefreshToken: refresh, Email: email, ExpiresAt: expiry, Source: path}, nil
+		return DecodeObject(data)
 	}
-	return nil, nil
+	return readObject(source)
+}
+
+// parseAntigravityCredential 兼容嵌套 token 与旧扁平凭据格式
+func parseAntigravityCredential(root object, source string) *model.Credential {
+	if root == nil {
+		return nil
+	}
+	body := root
+	if nested := obj(root["token"]); nested != nil {
+		body = nested
+	}
+	access := str(body, "access_token", "accessToken")
+	refresh := str(body, "refresh_token", "refreshToken")
+	if access == "" && refresh == "" {
+		return nil
+	}
+	expiry := date(body["expiry"])
+	if expiry == nil {
+		expiry = date(body["expiry_date"])
+	}
+	email := str(root, "id_token_email", "email")
+	if email == "" {
+		email = str(body, "email")
+	}
+	if email == "" {
+		email = Claim(str(body, "id_token"), "email")
+	}
+	if email == "" {
+		email = Claim(str(root, "id_token"), "email")
+	}
+	return &model.Credential{AccessToken: access, RefreshToken: refresh, Email: email, ExpiresAt: expiry, Source: source}
 }
 
 func sanitizeToken(token string) string {

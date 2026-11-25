@@ -6,33 +6,55 @@ export const quotaKeys = ['codex', 'claude', 'antigravity', 'cursor', 'commandco
 export const usageKeys = ['codex', 'claude', 'cursor', 'pi', 'opencode', 'dsh', 'omp']
 export const serviceColors = ['#74757d', '#d97757', '#303034', '#4b7ba9', '#168179', '#4176e6', '#9b4dff']
 
+const compactEnFmt = new Intl.NumberFormat('en', { notation: 'compact', maximumFractionDigits: 1 })
+const compactZhFmt = new Intl.NumberFormat('zh', { notation: 'compact', maximumFractionDigits: 1 })
+const moneyFmt = new Intl.NumberFormat('en', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
+const dateTimeShortEnFmt = new Intl.DateTimeFormat('en-US', {
+  month: '2-digit',
+  day: '2-digit',
+  hour: '2-digit',
+  minute: '2-digit',
+  hour12: false,
+})
+const dateTimeShortZhFmt = new Intl.DateTimeFormat('zh-CN', {
+  month: '2-digit',
+  day: '2-digit',
+  hour: '2-digit',
+  minute: '2-digit',
+  hour12: false,
+})
+const dateTimeFullEnFmt = new Intl.DateTimeFormat('en-US', {
+  year: 'numeric',
+  month: '2-digit',
+  day: '2-digit',
+  hour: '2-digit',
+  minute: '2-digit',
+  hour12: false,
+})
+const dateTimeFullZhFmt = new Intl.DateTimeFormat('zh-CN', {
+  year: 'numeric',
+  month: '2-digit',
+  day: '2-digit',
+  hour: '2-digit',
+  minute: '2-digit',
+  hour12: false,
+})
+
 // compact 根据界面语言缩写令牌数量
 export function compact(value: number, english: boolean): string {
   if (!english && value >= 100_000_000) return `${(value / 100_000_000).toFixed(2)}亿`
   if (!english && value >= 10_000) return `${(value / 10_000).toFixed(1)}万`
-  return new Intl.NumberFormat(english ? 'en' : 'zh', {
-    notation: 'compact',
-    maximumFractionDigits: 1,
-  }).format(value)
+  return (english ? compactEnFmt : compactZhFmt).format(value)
 }
 export function money(value: number): string {
-  return `$${value.toLocaleString('en', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
+  return `$${moneyFmt.format(value)}`
 }
 export function dateTime(value: string | undefined, english: boolean, short = false): string {
-  if (!value || !Number.isFinite(new Date(value).valueOf())) return '—'
-  return new Date(value).toLocaleString(
-    english ? 'en-US' : 'zh-CN',
-    short
-      ? { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false }
-      : {
-          year: 'numeric',
-          month: '2-digit',
-          day: '2-digit',
-          hour: '2-digit',
-          minute: '2-digit',
-          hour12: false,
-        },
-  )
+  if (!value) return '—'
+  const parsed = new Date(value)
+  if (!Number.isFinite(parsed.valueOf())) return '—'
+  if (short) return (english ? dateTimeShortEnFmt : dateTimeShortZhFmt).format(parsed)
+  return (english ? dateTimeFullEnFmt : dateTimeFullZhFmt).format(parsed)
 }
 export function remaining(used: number | undefined): number | undefined {
   return used === undefined ? undefined : Math.max(0, Math.min(100, 100 - used))

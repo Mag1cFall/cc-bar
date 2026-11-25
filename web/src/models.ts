@@ -152,6 +152,10 @@ export interface Overview {
     multiplierText: string
   }
 }
+export interface PopoverUsage {
+  today: Record<string, number>
+  week: Record<string, number>
+}
 export interface ConversationQuery {
   app: number | null
   from: string

@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { RefreshCw } from 'lucide-react'
 import { api } from './bridge'
 import { useApp } from './context'
@@ -11,18 +11,40 @@ import Cycles from './statistics/Cycles'
 import Timeline from './statistics/Timeline'
 
 // Statistics 保持服务筛选与日周月日期范围独立于各统计页面
-export default function Statistics({ page, service }: { page: string; service: number | null }) {
+export default function Statistics({
+  page,
+  service,
+  active = true,
+}: {
+  page: string
+  service: number | null
+  active?: boolean
+}) {
   const { tr, busy, run, snapshot } = useApp()
   const [grain, setGrain] = useState('day')
   const [range, setRange] = useState('today')
   const [customFrom, setCustomFrom] = useState(() => localDate(new Date(Date.now() - 7 * 86_400_000)))
   const [customTo, setCustomTo] = useState(() => localDate(new Date()))
-  const query: UsageQuery = {
-    service,
-    grain,
-    ...dateBounds(range, customFrom, customTo),
-    compare: range !== 'all' && range !== 'custom',
-  }
+  const [dayKey, setDayKey] = useState(() => localDate(new Date()))
+  useEffect(() => {
+    if (!active) return
+    const sync = () => setDayKey(localDate(new Date()))
+    const immediate = window.setTimeout(sync, 0)
+    const timer = window.setInterval(sync, 60_000)
+    return () => {
+      window.clearTimeout(immediate)
+      window.clearInterval(timer)
+    }
+  }, [active])
+  const query: UsageQuery = useMemo(
+    () => ({
+      service,
+      grain,
+      ...dateBounds(range, customFrom, customTo, new Date(`${dayKey}T00:00:00`)),
+      compare: range !== 'all' && range !== 'custom',
+    }),
+    [service, grain, range, customFrom, customTo, dayKey],
+  )
   const title =
     page === 'conversations'
       ? tr('Conversations', '对话')
@@ -139,13 +161,13 @@ export default function Statistics({ page, service }: { page: string; service: n
         </div>
       )}
       {page === 'conversations' ? (
-        <Conversations query={query} />
+        <Conversations query={query} active={active} />
       ) : page === 'cycles' ? (
-        <Cycles service={service} />
+        <Cycles service={service} active={active} />
       ) : page === 'timeline' ? (
-        <Timeline service={service} />
+        <Timeline service={service} active={active} />
       ) : (
-        <Overview query={query} />
+        <Overview query={query} active={active} />
       )}
     </div>
   )

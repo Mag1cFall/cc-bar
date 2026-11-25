@@ -59,8 +59,8 @@ type CyclePayload struct {
 
 // Cycles 返回隔离后的周期记录快照
 func (store *Store) Cycles() CyclePayload {
-	store.mu.Lock()
-	defer store.mu.Unlock()
+	store.mu.RLock()
+	defer store.mu.RUnlock()
 	payload := store.cycles
 	payload.Records = append([]CycleRecord{}, payload.Records...)
 	payload.AccountSegments = append([]AccountSegment{}, payload.AccountSegments...)
@@ -138,7 +138,8 @@ func sourcePreference(a, b string) string {
 	return b
 }
 
-func (store *Store) recordCycles(key string, app model.UsageApp, snapshot model.QuotaSnapshot, source string, at time.Time) {
+func (store *Store) recordCycles(key string, app model.UsageApp, snapshot model.QuotaSnapshot, source string, at time.Time) bool {
+	urgent := false
 	active := -1
 	for index := len(store.cycles.AccountSegments) - 1; index >= 0; index-- {
 		segment := store.cycles.AccountSegments[index]
@@ -148,6 +149,7 @@ func (store *Store) recordCycles(key string, app model.UsageApp, snapshot model.
 		}
 	}
 	if active < 0 || store.cycles.AccountSegments[active].AccountKey != key {
+		urgent = true
 		if active >= 0 {
 			store.cycles.AccountSegments[active].EndAt = &at
 		}
@@ -192,6 +194,9 @@ func (store *Store) recordCycles(key string, app model.UsageApp, snapshot model.
 			record := &store.cycles.Records[index]
 			previous := record.LatestUsedPercent
 			wasActive := record.EndAt.After(at)
+			if previous != used || math.Abs(record.ScheduledEndAt.Sub(end).Seconds()) >= 5 {
+				urgent = true
+			}
 			record.StartAt = minimum(record.StartAt, start)
 			if math.Abs(record.ScheduledEndAt.Sub(end).Seconds()) >= 5 {
 				record.ScheduledEndAt = end
@@ -214,11 +219,13 @@ func (store *Store) recordCycles(key string, app model.UsageApp, snapshot model.
 			}
 			if len(record.AllowanceSegments) == 0 {
 				record.AllowanceSegments = append(record.AllowanceSegments, store.initialAllowance(*record, used, at))
+				urgent = true
 			} else {
 				last := &record.AllowanceSegments[len(record.AllowanceSegments)-1]
 				if extraReset(previous, used) {
 					last.EndAt = &at
 					record.AllowanceSegments = append(record.AllowanceSegments, AllowanceSegment{fmt.Sprintf("%s|allowance|%d", record.ID, at.Unix()), at, nil, used, used, used, at, at, 1})
+					urgent = true
 				} else {
 					last.LatestUsedPercent = used
 					last.MaximumUsedPercent = math.Max(last.MaximumUsedPercent, used)
@@ -226,6 +233,7 @@ func (store *Store) recordCycles(key string, app model.UsageApp, snapshot model.
 				}
 			}
 		} else {
+			urgent = true
 			for i := range store.cycles.Records {
 				record := &store.cycles.Records[i]
 				if record.AccountKey == key && record.App == app && record.LimitKind == limit.Kind && record.StartAt.Before(start) && record.EndAt.After(start) && math.Abs(record.StartAt.Sub(start).Seconds()) >= 60 && record.EndAt.Sub(start) > 60*time.Second {
@@ -244,6 +252,7 @@ func (store *Store) recordCycles(key string, app model.UsageApp, snapshot model.
 		}
 	}
 	store.normalizeCycles()
+	return urgent
 }
 
 func (store *Store) initialAllowance(record CycleRecord, used float64, at time.Time) AllowanceSegment {
